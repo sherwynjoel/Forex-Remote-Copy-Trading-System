@@ -11,6 +11,9 @@ REAL-TIME TRANSPORT (Redis pub/sub master:*:events, WebSocket /ws/slave)
        |
 COPY ENGINE
        |
+SYMBOL MAPPING + RISK CHECKS (allowed/blocked symbols, max positions,
+                               max exposure, emergency stop)
+       |
 VOLUME CALCULATOR (fixed/multiplier/balance/equity sizing, min/max/step)
        |
 EXECUTION (Slave connector)
@@ -146,6 +149,54 @@ involve volume, so neither needs sizing. A rejection creates the
 never sends an instruction, the same pattern already used for
 `NO_MATCHING_OPEN_COPY` and `SLAVE_OFFLINE`.
 
+## Symbol Mapping + Risk Limits
+
+Scoped to symbol mapping (spec §14) plus the four risk limits (spec §15)
+directly derivable from data the system already has — allowed/blocked
+symbols, max concurrent positions, max exposure, emergency stop. Max daily
+loss and max drawdown need equity-history tracking (a start-of-day
+snapshot and a running peak equity) this system doesn't have yet, and are
+explicitly deferred rather than approximated.
+
+**Design rule**: every check here gates `OPEN` only. `CLOSE` and `MODIFY`
+always go through unmodified — a limit or an emergency stop exists to
+prevent *new* risk; blocking a CLOSE during an emergency stop would trap
+risk open, which is backwards from what "emergency stop" is for.
+
+`symbol_mappings` (per-Slave Master-symbol → Slave-symbol, e.g. `XAUUSD` →
+`XAUUSDm`) is resolved by `modules/slaves/symbolMapping.service.ts`,
+falling back to the Master's symbol unchanged when no mapping exists —
+today's behavior, preserved as the default. Destination-symbol *existence*
+validation was already handled before this change:
+`slave-service/main.py::execute_open` calls `mt5.symbol_select()` and
+fails with a reason if the broker doesn't recognize it (Phase 1) — only
+the Slave's own terminal knows its broker's symbol universe, so that check
+has to stay there regardless of what the backend does with the name.
+
+`modules/copy-engine/riskChecks.ts` is pure, like `volumeCalculator.ts`:
+
+```
+checkEntryAllowed(...)     // before sizing — cheap, fails fast
+  emergencyStop -> EMERGENCY_STOP_ACTIVE
+  blockedSymbols.includes(symbol) -> SYMBOL_BLOCKED
+  allowedSymbols non-empty and missing symbol -> SYMBOL_NOT_ALLOWED
+  currentOpenPositions >= maxPositions -> MAX_POSITIONS_REACHED
+
+checkExposureAllowed(...)  // after sizing — exposure is about the
+                            // calculated lot amount, not the raw Master volume
+  currentOpenExposure + incomingVolume > maxExposure -> MAX_EXPOSURE_EXCEEDED
+```
+
+"Open positions" (feeding both checks) is derived from `copy_orders`, not
+tracked separately: `getOpenPositionsSummary()` in `copyEngine.ts` finds
+EXECUTED `OPEN`s whose `masterTicket` has no EXECUTED `CLOSE` yet — same
+lookup style already used for the CLOSE/MODIFY prior-ticket resolution.
+Fetched once per `OPEN` and reused for both checks. The repeated "create a
+`copy_orders` row straight to `FAILED` with a reason, never send anything"
+pattern (now four call sites: no matching open copy, volume-calculator
+rejection, entry-risk rejection, exposure rejection) is a single
+`failCopyOrder()` helper rather than copy-pasted.
+
 ## Why the Master and Slave connectors are different technologies
 
 - **Master** needs true event-driven *detection* — the most latency-critical
@@ -160,11 +211,14 @@ never sends an instruction, the same pattern already used for
 ## Data model
 
 `masters`, `connectors`, `trade_events`, `audit_logs`, `slaves`,
-`copy_orders` — see `backend/src/db/prisma/schema.prisma`. `masters` and
-`slaves` also carry `balance`/`equity` (heartbeat-updated); `slaves` carries
-its Volume Calculator config (`copyMode`, `fixedLot`, `multiplier`,
-`minLot`, `maxLot`, `lotStep`). Later phases add `execution_logs`,
-`risk_settings`, `symbol_mappings` on top, without reshaping what's here.
+`copy_orders`, `symbol_mappings` — see
+`backend/src/db/prisma/schema.prisma`. `masters` and `slaves` also carry
+`balance`/`equity` (heartbeat-updated); `slaves` carries its Volume
+Calculator config (`copyMode`, `fixedLot`, `multiplier`, `minLot`,
+`maxLot`, `lotStep`) and risk config (`emergencyStop`, `allowedSymbols`,
+`blockedSymbols`, `maxPositions`, `maxExposure`). Later phases add
+`execution_logs`, `risk_settings` (max daily loss/drawdown) on top,
+without reshaping what's here.
 
 ## What's next (not built yet)
 
@@ -172,10 +226,9 @@ its Volume Calculator config (`copyMode`, `fixedLot`, `multiplier`,
   these (Phase 1) but the Copy Engine still ignores them
   (`isCopyableEvent` in `copyEngine.ts`); deliberately deferred out of
   Phase 3's scope.
-- **Symbol mapping and the broader risk limits** — max daily loss/drawdown/
-  positions/exposure, allowed/blocked symbols, emergency stop, percentage-
-  risk sizing. Master and Slave are still assumed to use identical symbol
-  names.
+- **Max daily loss and max drawdown** — need a start-of-day equity
+  snapshot and a running peak equity, neither tracked yet; deliberately
+  deferred rather than approximated. Percentage-risk volume sizing.
 - **Phase 5** — reconciliation (Master vs. system vs. Slave state).
 - **Phase 6** — Super Admin dashboard (React/TS/Tailwind), WebSocket
   gateway to the browser.

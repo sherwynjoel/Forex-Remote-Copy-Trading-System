@@ -107,13 +107,41 @@ model Slave {
   balance Decimal? @map("balance") @db.Decimal(18, 2)
   equity  Decimal? @map("equity") @db.Decimal(18, 2)
 
+  // Risk limits (spec section 15) — all default to "off / no restriction"
+  // since these are opt-in guardrails, not always-on caps like maxLot
+  // above. Enforced only on OPEN; see modules/copy-engine/riskChecks.ts.
+  // Max daily loss / max drawdown are deferred (need equity-history
+  // tracking this system doesn't have yet).
+  emergencyStop  Boolean  @default(false) @map("emergency_stop")
+  allowedSymbols String[] @default([]) @map("allowed_symbols")
+  blockedSymbols String[] @default([]) @map("blocked_symbols")
+  maxPositions   Int?     @map("max_positions")
+  maxExposure    Decimal? @map("max_exposure") @db.Decimal(18, 2)
+
   createdAt DateTime @default(now()) @map("created_at")
 
-  connectors Connector[]
-  copyOrders CopyOrder[]
+  connectors      Connector[]
+  copyOrders      CopyOrder[]
+  symbolMappings  SymbolMapping[]
 
   @@index([masterId])
   @@map("slaves")
+}
+
+// Per-Slave Master-symbol -> Slave-symbol translation (spec section 14),
+// e.g. XAUUSD -> XAUUSDm for a broker with a different suffix convention.
+// Falls back to the Master's symbol unchanged when no mapping exists — see
+// modules/slaves/symbolMapping.service.ts.
+model SymbolMapping {
+  id           String   @id @default(uuid())
+  slaveId      String   @map("slave_id")
+  slave        Slave    @relation(fields: [slaveId], references: [id])
+  masterSymbol String   @map("master_symbol")
+  slaveSymbol  String   @map("slave_symbol")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([slaveId, masterSymbol])
+  @@map("symbol_mappings")
 }
 
 // A connector is either bound to a Master (the MQL5 EA, Phase 1) or a Slave

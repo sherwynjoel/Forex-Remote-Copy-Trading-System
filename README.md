@@ -5,13 +5,14 @@ MT5 account to multiple Slave MT5 accounts in real time. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full layered design and
 current build status.
 
-**Status: Phase 4** — Master trade detection/transmission, Master → Backend
-→ Slave copying (OPEN/CLOSE/MODIFY) fanning out concurrently to multiple
-Slaves, and per-Slave volume sizing (fixed lot / multiplier / balance- or
-equity-proportional, with min/max lot and lot-step enforcement) all proven
-end-to-end. No PARTIAL_CLOSE/pending orders, symbol mapping, broader risk
-limits, reconciliation, or dashboard yet (see "What's next" in the
-architecture doc).
+**Status**: Master trade detection/transmission, Master → Backend → Slave
+copying (OPEN/CLOSE/MODIFY) fanning out concurrently to multiple Slaves,
+per-Slave volume sizing (fixed lot / multiplier / balance- or
+equity-proportional), per-Slave symbol mapping, and risk limits (allowed/
+blocked symbols, max positions, max exposure, emergency stop) all proven
+end-to-end. No PARTIAL_CLOSE/pending orders, max daily loss/drawdown,
+reconciliation, or dashboard yet (see "What's next" in the architecture
+doc).
 
 ## Repository layout
 
@@ -89,6 +90,30 @@ with the Slave set to `copyMode=BALANCE_PROPORTIONAL`, a Master OPEN of
 `1.0` should size to `0.5` on that Slave. A Slave with `FIXED_LOT` and no
 `fixedLot` configured, or a size that rounds below `minLot`, should fail
 the `copy_orders` row with a reason instead of sending anything.
+
+### Trying symbol mapping and risk limits
+
+```bash
+# Map XAUUSD to a broker-specific symbol name for one Slave:
+curl -X POST http://localhost:4000/api/slaves/<slaveId>/symbol-mappings \
+  -H "Content-Type: application/json" -d '{"masterSymbol":"XAUUSD","slaveSymbol":"XAUUSDm"}'
+
+# Block a symbol, cap concurrent positions, cap total exposure, or hit the
+# emergency stop -- all via the same PATCH used for volume config:
+curl -X PATCH http://localhost:4000/api/slaves/<slaveId> \
+  -H "Content-Type: application/json" \
+  -d '{"blockedSymbols":["XAUUSD"],"maxPositions":5,"maxExposure":2.0}'
+
+curl -X PATCH http://localhost:4000/api/slaves/<slaveId> \
+  -H "Content-Type: application/json" -d '{"emergencyStop":true}'
+```
+
+A Master OPEN for `XAUUSD` should arrive at the fake Slave as `XAUUSDm`
+once mapped. With `blockedSymbols` set, that same OPEN should fail in
+`copy_orders` with `SYMBOL_BLOCKED` and nothing should be sent. With
+`emergencyStop` on, new OPENs are rejected (`EMERGENCY_STOP_ACTIVE`) but a
+CLOSE for a position already open on that Slave still goes through — the
+checks only ever gate new risk, never a reduction of existing risk.
 
 Run the test suite (requires Postgres/Redis up, as above):
 

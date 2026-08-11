@@ -1,8 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { prisma } from "../../db/client.js";
-import { createSlaveSchema, updateSlaveSchema } from "./slave.schema.js";
+import { createSlaveSchema, updateSlaveSchema, createSymbolMappingSchema } from "./slave.schema.js";
 import { registerConnector } from "../connectors/connector.service.js";
 import { writeAudit } from "../audit/audit.service.js";
+import { upsertSymbolMapping, listSymbolMappings, deleteSymbolMapping } from "./symbolMapping.service.js";
 
 export async function slaveRoutes(app: FastifyInstance) {
   app.post("/api/slaves", async (request, reply) => {
@@ -96,5 +97,52 @@ export async function slaveRoutes(app: FastifyInstance) {
     });
 
     return reply.code(201).send({ connectorId, slaveId: id, token });
+  });
+
+  // Master-symbol -> Slave-symbol translation (spec section 14). Upserts
+  // by (slaveId, masterSymbol) — posting the same masterSymbol again just
+  // updates its mapping rather than erroring.
+  app.post("/api/slaves/:id/symbol-mappings", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const slave = await prisma.slave.findUnique({ where: { id } });
+    if (!slave) return reply.code(404).send({ status: "NOT_FOUND" });
+
+    const parsed = createSymbolMappingSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ status: "INVALID_PAYLOAD", errors: parsed.error.flatten() });
+    }
+
+    const mapping = await upsertSymbolMapping(id, parsed.data.masterSymbol, parsed.data.slaveSymbol);
+    await writeAudit({
+      actor: "admin",
+      action: "SYMBOL_MAPPING_SET",
+      entity: `slave:${id}`,
+      newValue: { masterSymbol: mapping.masterSymbol, slaveSymbol: mapping.slaveSymbol },
+      ip: request.ip,
+    });
+
+    return reply.code(201).send(mapping);
+  });
+
+  app.get("/api/slaves/:id/symbol-mappings", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const mappings = await listSymbolMappings(id);
+    return reply.send(mappings);
+  });
+
+  app.delete("/api/slaves/:id/symbol-mappings/:mappingId", async (request, reply) => {
+    const { id, mappingId } = request.params as { id: string; mappingId: string };
+    const deleted = await deleteSymbolMapping(id, mappingId);
+    if (!deleted) return reply.code(404).send({ status: "NOT_FOUND" });
+
+    await writeAudit({
+      actor: "admin",
+      action: "SYMBOL_MAPPING_DELETED",
+      entity: `slave:${id}`,
+      oldValue: { mappingId },
+      ip: request.ip,
+    });
+
+    return reply.code(204).send();
   });
 }

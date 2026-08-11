@@ -1,4 +1,4 @@
-import type { Slave } from "@prisma/client";
+import type { Slave, TradeEventType } from "@prisma/client";
 import { prisma } from "../../db/client.js";
 import { redisSub } from "../../config/redis.js";
 import { logger } from "../../config/logger.js";
@@ -6,6 +6,8 @@ import { onSlaveMessage, sendToSlave, isSlaveConnected } from "../realtime/wsGat
 import { executionResultSchema, type CopyAction, type CopyInstruction } from "../../types/copyOrder.js";
 import type { NormalizedTradeEvent } from "../../types/tradeEvent.js";
 import { calculateVolume } from "./volumeCalculator.js";
+import { checkEntryAllowed, checkExposureAllowed } from "./riskChecks.js";
+import { resolveSlaveSymbol } from "../slaves/symbolMapping.service.js";
 
 const MASTER_EVENTS_PATTERN = "master:*:events";
 
@@ -95,6 +97,54 @@ async function handleMasterEvent(event: NormalizedTradeEvent): Promise<void> {
   }
 }
 
+/** Creates a copy_orders row that goes straight to FAILED — used for every rejection that happens before an instruction is ever sent. */
+async function failCopyOrder(params: {
+  tradeEventId: string;
+  masterId: string;
+  slaveId: string;
+  masterTicket: string;
+  type: TradeEventType;
+  reason: string;
+  requestedVolume?: number;
+}): Promise<void> {
+  await prisma.copyOrder.create({
+    data: {
+      tradeEventId: params.tradeEventId,
+      masterId: params.masterId,
+      slaveId: params.slaveId,
+      masterTicket: params.masterTicket,
+      type: params.type,
+      status: "FAILED",
+      requestedVolume: params.requestedVolume,
+      errorReason: params.reason,
+    },
+  });
+  logger.warn({ slaveId: params.slaveId, masterTicket: params.masterTicket, reason: params.reason }, "copy order failed before send");
+}
+
+/**
+ * "Open positions" for a Slave, derived from copy_orders rather than
+ * tracked separately: EXECUTED OPENs whose masterTicket has no EXECUTED
+ * CLOSE yet. Feeds both maxPositions and maxExposure — fetched once and
+ * reused for both checks.
+ */
+async function getOpenPositionsSummary(slaveId: string): Promise<{ count: number; totalVolume: number }> {
+  const [opens, closes] = await Promise.all([
+    prisma.copyOrder.findMany({
+      where: { slaveId, type: "OPEN", status: "EXECUTED" },
+      select: { masterTicket: true, requestedVolume: true },
+    }),
+    prisma.copyOrder.findMany({
+      where: { slaveId, type: "CLOSE", status: "EXECUTED" },
+      select: { masterTicket: true },
+    }),
+  ]);
+  const closedTickets = new Set(closes.map((c) => c.masterTicket));
+  const openPositions = opens.filter((o) => !closedTickets.has(o.masterTicket));
+  const totalVolume = openPositions.reduce((sum, o) => sum + (o.requestedVolume ? Number(o.requestedVolume) : 0), 0);
+  return { count: openPositions.length, totalVolume };
+}
+
 async function copyToSlave(
   slave: Slave,
   tradeEventId: string,
@@ -104,30 +154,52 @@ async function copyToSlave(
   const slaveId = slave.id;
   let slaveTicket: string | undefined;
   let volume = event.volume;
+  const resolvedSymbol = await resolveSlaveSymbol(slaveId, event.symbol);
 
   if (event.type === "CLOSE" || event.type === "MODIFY") {
+    // Risk limits and the volume calculator gate OPEN only — a limit or an
+    // emergency stop exists to prevent new risk, not to trap existing risk
+    // open by blocking a reduction.
     const priorOpen = await prisma.copyOrder.findFirst({
       where: { slaveId, masterTicket: event.masterTicket, type: "OPEN", status: "EXECUTED" },
       orderBy: { createdAt: "desc" },
     });
 
     if (!priorOpen?.slaveTicket) {
-      await prisma.copyOrder.create({
-        data: {
-          tradeEventId,
-          masterId: event.masterId,
-          slaveId,
-          masterTicket: event.masterTicket,
-          type: event.type,
-          status: "FAILED",
-          errorReason: "NO_MATCHING_OPEN_COPY",
-        },
+      await failCopyOrder({
+        tradeEventId,
+        masterId: event.masterId,
+        slaveId,
+        masterTicket: event.masterTicket,
+        type: event.type,
+        reason: "NO_MATCHING_OPEN_COPY",
       });
-      logger.warn({ slaveId, masterTicket: event.masterTicket, type: event.type }, "no matching open copy to act on");
       return;
     }
     slaveTicket = priorOpen.slaveTicket;
   } else if (event.type === "OPEN") {
+    const openSummary = await getOpenPositionsSummary(slaveId);
+
+    const entryCheck = checkEntryAllowed({
+      emergencyStop: slave.emergencyStop,
+      allowedSymbols: slave.allowedSymbols,
+      blockedSymbols: slave.blockedSymbols,
+      symbol: event.symbol,
+      maxPositions: slave.maxPositions,
+      currentOpenPositions: openSummary.count,
+    });
+    if (!entryCheck.allowed) {
+      await failCopyOrder({
+        tradeEventId,
+        masterId: event.masterId,
+        slaveId,
+        masterTicket: event.masterTicket,
+        type: event.type,
+        reason: entryCheck.reason,
+      });
+      return;
+    }
+
     // Only OPEN needs sizing — CLOSE always closes the Slave's existing
     // full position (see slave-service/main.py::execute_close) and MODIFY
     // doesn't involve volume at all.
@@ -146,21 +218,36 @@ async function copyToSlave(
     });
 
     if ("rejected" in sizing) {
-      await prisma.copyOrder.create({
-        data: {
-          tradeEventId,
-          masterId: event.masterId,
-          slaveId,
-          masterTicket: event.masterTicket,
-          type: event.type,
-          status: "FAILED",
-          requestedVolume: event.volume,
-          errorReason: sizing.reason,
-        },
+      await failCopyOrder({
+        tradeEventId,
+        masterId: event.masterId,
+        slaveId,
+        masterTicket: event.masterTicket,
+        type: event.type,
+        reason: sizing.reason,
+        requestedVolume: event.volume,
       });
-      logger.warn({ slaveId, masterTicket: event.masterTicket, reason: sizing.reason }, "volume calculator rejected the trade");
       return;
     }
+
+    const exposureCheck = checkExposureAllowed({
+      maxExposure: slave.maxExposure ? Number(slave.maxExposure) : null,
+      currentOpenExposure: openSummary.totalVolume,
+      incomingVolume: sizing.volume,
+    });
+    if (!exposureCheck.allowed) {
+      await failCopyOrder({
+        tradeEventId,
+        masterId: event.masterId,
+        slaveId,
+        masterTicket: event.masterTicket,
+        type: event.type,
+        reason: exposureCheck.reason,
+        requestedVolume: sizing.volume,
+      });
+      return;
+    }
+
     volume = sizing.volume;
   }
 
@@ -188,7 +275,7 @@ async function copyToSlave(
   const instruction: CopyInstruction = {
     copyId: copyOrder.id,
     action: event.type,
-    symbol: event.symbol,
+    symbol: resolvedSymbol,
     side: event.side,
     volume,
     sl: event.sl,
