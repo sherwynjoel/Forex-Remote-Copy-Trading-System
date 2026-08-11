@@ -14,15 +14,19 @@ export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
+export type ConnectorOwner = { masterId: string } | { slaveId: string };
+
 export interface AuthenticatedConnector {
   connectorId: string;
-  masterId: string;
+  ownerType: "MASTER" | "SLAVE";
+  masterId: string | null;
+  slaveId: string | null;
 }
 
 /**
- * Resolves a bearer token to a connector/master pair. Reads through a Redis
- * cache first so the trade-event critical path avoids a Postgres round trip
- * on the common case.
+ * Resolves a bearer token to its owning Master (the MQL5 EA) or Slave (the
+ * Python service). Reads through a Redis cache first so the trade-event
+ * critical path avoids a Postgres round trip on the common case.
  */
 export async function authenticateConnector(token: string): Promise<AuthenticatedConnector | null> {
   const tokenHash = hashToken(token);
@@ -35,21 +39,27 @@ export async function authenticateConnector(token: string): Promise<Authenticate
 
   const connector = await prisma.connector.findUnique({
     where: { tokenHash },
-    select: { id: true, masterId: true },
+    select: { id: true, masterId: true, slaveId: true },
   });
 
   if (!connector) return null;
 
-  const result: AuthenticatedConnector = { connectorId: connector.id, masterId: connector.masterId };
+  const result: AuthenticatedConnector = {
+    connectorId: connector.id,
+    ownerType: connector.masterId ? "MASTER" : "SLAVE",
+    masterId: connector.masterId,
+    slaveId: connector.slaveId,
+  };
   await redis.set(cacheKey, JSON.stringify(result), "EX", TOKEN_CACHE_TTL_SECONDS);
   return result;
 }
 
-export async function registerConnector(masterId: string, version?: string) {
+export async function registerConnector(owner: ConnectorOwner, version?: string) {
   const token = generateConnectorToken();
   const connector = await prisma.connector.create({
     data: {
-      masterId,
+      masterId: "masterId" in owner ? owner.masterId : undefined,
+      slaveId: "slaveId" in owner ? owner.slaveId : undefined,
       tokenHash: hashToken(token),
       version,
       status: "CONNECTING",

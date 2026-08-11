@@ -51,7 +51,7 @@ export async function masterRoutes(app: FastifyInstance) {
     if (!master) return reply.code(404).send({ status: "NOT_FOUND" });
 
     const body = (request.body ?? {}) as { version?: string };
-    const { connectorId, token } = await registerConnector(id, body.version);
+    const { connectorId, token } = await registerConnector({ masterId: id }, body.version);
 
     await writeAudit({
       actor: "admin",

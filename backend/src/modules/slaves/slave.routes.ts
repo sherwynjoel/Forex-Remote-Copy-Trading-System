@@ -1,0 +1,89 @@
+import type { FastifyInstance } from "fastify";
+import { prisma } from "../../db/client.js";
+import { createSlaveSchema, updateSlaveSchema } from "./slave.schema.js";
+import { registerConnector } from "../connectors/connector.service.js";
+import { writeAudit } from "../audit/audit.service.js";
+
+export async function slaveRoutes(app: FastifyInstance) {
+  app.post("/api/slaves", async (request, reply) => {
+    const parsed = createSlaveSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ status: "INVALID_PAYLOAD", errors: parsed.error.flatten() });
+    }
+
+    const master = await prisma.master.findUnique({ where: { id: parsed.data.masterId } });
+    if (!master) return reply.code(404).send({ status: "MASTER_NOT_FOUND" });
+
+    const slave = await prisma.slave.create({ data: parsed.data });
+    await writeAudit({
+      actor: "admin",
+      action: "SLAVE_CREATED",
+      entity: `slave:${slave.id}`,
+      newValue: slave,
+      ip: request.ip,
+    });
+
+    return reply.code(201).send(slave);
+  });
+
+  app.get("/api/slaves", async (request, reply) => {
+    const { masterId } = request.query as { masterId?: string };
+    const slaves = await prisma.slave.findMany({
+      where: masterId ? { masterId } : undefined,
+      include: { connectors: { select: { id: true, status: true, lastHeartbeatAt: true } } },
+      orderBy: { createdAt: "desc" },
+    });
+    return reply.send(slaves);
+  });
+
+  app.get("/api/slaves/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const slave = await prisma.slave.findUnique({ where: { id }, include: { connectors: true } });
+    if (!slave) return reply.code(404).send({ status: "NOT_FOUND" });
+    return reply.send(slave);
+  });
+
+  // Pause/resume copying for a Slave without detaching it from its Master.
+  app.patch("/api/slaves/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = updateSlaveSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ status: "INVALID_PAYLOAD", errors: parsed.error.flatten() });
+    }
+
+    const existing = await prisma.slave.findUnique({ where: { id } });
+    if (!existing) return reply.code(404).send({ status: "NOT_FOUND" });
+
+    const slave = await prisma.slave.update({ where: { id }, data: parsed.data });
+    await writeAudit({
+      actor: "admin",
+      action: "SLAVE_UPDATED",
+      entity: `slave:${id}`,
+      oldValue: { copyEnabled: existing.copyEnabled },
+      newValue: { copyEnabled: slave.copyEnabled },
+      ip: request.ip,
+    });
+
+    return reply.send(slave);
+  });
+
+  // Issues a connector token for a slave, exactly like POST /api/masters/:id/connectors.
+  app.post("/api/slaves/:id/connectors", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const slave = await prisma.slave.findUnique({ where: { id } });
+    if (!slave) return reply.code(404).send({ status: "NOT_FOUND" });
+
+    const body = (request.body ?? {}) as { version?: string };
+    const { connectorId, token } = await registerConnector({ slaveId: id }, body.version);
+
+    await writeAudit({
+      actor: "admin",
+      action: "CONNECTOR_REGISTERED",
+      entity: `connector:${connectorId}`,
+      newValue: { slaveId: id },
+      ip: request.ip,
+    });
+
+    return reply.code(201).send({ connectorId, slaveId: id, token });
+  });
+}

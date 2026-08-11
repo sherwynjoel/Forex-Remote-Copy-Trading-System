@@ -9,20 +9,25 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "simulate": "tsx tools/simulate-master-event.ts",
+    "simulate:slave": "tsx tools/simulate-slave.ts",
     "seed": "tsx tools/seed.ts",
     "prisma:generate": "prisma generate --schema=src/db/prisma/schema.prisma",
     "prisma:migrate": "prisma migrate dev --schema=src/db/prisma/schema.prisma"
   },
   "dependencies": {
+    "@fastify/websocket": "^11.3.0",
     "@prisma/client": "^5.20.0",
     "fastify": "^5.11.3",
+    "fastify-plugin": "^6.0.0",
     "ioredis": "^5.4.1",
     "pino": "^9.4.0",
     "pino-pretty": "^11.2.2",
+    "ws": "^8.21.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
+    "@types/ws": "^8.18.1",
     "prisma": "^5.20.0",
     "tsx": "^4.19.1",
     "typescript": "^5.6.2",

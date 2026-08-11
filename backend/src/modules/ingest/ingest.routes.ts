@@ -23,9 +23,12 @@ export async function ingestRoutes(app: FastifyInstance) {
     }
 
     const auth = await authenticateConnector(token);
-    if (!auth) {
+    if (!auth || auth.ownerType !== "MASTER" || !auth.masterId) {
+      // A Slave connector's token must never be usable to inject Master
+      // trade events — never trust an arbitrary client connection.
       return reply.code(401).send({ status: "UNAUTHORIZED" });
     }
+    const masterId = auth.masterId;
 
     const parsed = tradeEventPayloadSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -44,7 +47,7 @@ export async function ingestRoutes(app: FastifyInstance) {
 
     const event: NormalizedTradeEvent = {
       ...payload,
-      masterId: auth.masterId,
+      masterId,
       backendReceivedTime,
     };
 

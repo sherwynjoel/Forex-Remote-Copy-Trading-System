@@ -1,4 +1,4 @@
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import { env } from "./env.js";
 
 // Two connections: one for normal commands, one dedicated to pub/sub

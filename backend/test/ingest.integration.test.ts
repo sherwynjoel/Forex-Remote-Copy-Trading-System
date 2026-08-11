@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { buildApp } from "../src/app.js";
 import { prisma } from "../src/db/client.js";
@@ -11,7 +10,7 @@ import { registerConnector } from "../src/modules/connectors/connector.service.j
  * and DATABASE_URL/REDIS_URL to be set — same as running the app itself.
  */
 describe("POST /api/ingest/trade-event", () => {
-  let app: FastifyInstance;
+  let app: ReturnType<typeof buildApp>;
   let token: string;
   let masterId: string;
 
@@ -30,7 +29,7 @@ describe("POST /api/ingest/trade-event", () => {
     });
     masterId = master.id;
 
-    const registered = await registerConnector(masterId, "test");
+    const registered = await registerConnector({ masterId }, "test");
     token = registered.token;
   });
 
@@ -75,7 +74,7 @@ describe("POST /api/ingest/trade-event", () => {
 
     const published: string[] = [];
     await redisSub.subscribe(`master:${masterId}:events`);
-    redisSub.on("message", (_channel, message) => published.push(message));
+    redisSub.on("message", (_channel: string, message: string) => published.push(message));
 
     const response = await app.inject({
       method: "POST",

@@ -12,6 +12,14 @@ enum MasterStatus {
   DISABLED
 }
 
+enum SlaveStatus {
+  ONLINE
+  OFFLINE
+  CONNECTING
+  ERROR
+  DISABLED
+}
+
 enum ConnectorStatus {
   ONLINE
   OFFLINE
@@ -34,6 +42,14 @@ enum TradeSide {
   SELL
 }
 
+enum CopyOrderStatus {
+  PENDING
+  SENT
+  EXECUTED
+  FAILED
+  REJECTED
+}
+
 model Master {
   id            String       @id @default(uuid())
   name          String
@@ -46,14 +62,41 @@ model Master {
 
   connectors  Connector[]
   tradeEvents TradeEvent[]
+  slaves      Slave[]
+  copyOrders  CopyOrder[]
 
   @@map("masters")
 }
 
+model Slave {
+  id            String      @id @default(uuid())
+  masterId      String      @map("master_id")
+  master        Master      @relation(fields: [masterId], references: [id])
+  name          String
+  accountNumber String      @unique @map("account_number")
+  broker        String
+  platform      String      @default("MT5")
+  server        String
+  status        SlaveStatus @default(CONNECTING)
+  copyEnabled   Boolean     @default(true) @map("copy_enabled")
+  createdAt     DateTime    @default(now()) @map("created_at")
+
+  connectors Connector[]
+  copyOrders CopyOrder[]
+
+  @@index([masterId])
+  @@map("slaves")
+}
+
+// A connector is either bound to a Master (the MQL5 EA, Phase 1) or a Slave
+// (the Python service, Phase 2) — never both. Sharing one table/auth path
+// avoids duplicating the identical register/authenticate/heartbeat logic.
 model Connector {
   id              String          @id @default(uuid())
-  masterId        String          @map("master_id")
-  master          Master          @relation(fields: [masterId], references: [id])
+  masterId        String?         @map("master_id")
+  master          Master?         @relation(fields: [masterId], references: [id])
+  slaveId         String?         @map("slave_id")
+  slave           Slave?          @relation(fields: [slaveId], references: [id])
   tokenHash       String          @unique @map("token_hash")
   version         String?
   status          ConnectorStatus @default(CONNECTING)
@@ -61,6 +104,7 @@ model Connector {
   createdAt       DateTime        @default(now()) @map("created_at")
 
   @@index([masterId])
+  @@index([slaveId])
   @@map("connectors")
 }
 
@@ -83,10 +127,42 @@ model TradeEvent {
   backendReceivedTime DateTime       @map("backend_received_time")
   createdAt           DateTime       @default(now()) @map("created_at")
 
+  copyOrders CopyOrder[]
+
   @@index([masterId])
   @@index([masterTicket])
   @@index([createdAt])
   @@map("trade_events")
+}
+
+// One row per (trade_event, slave) — CLOSE and MODIFY get their own row,
+// not just OPEN, so each copy action is tracked with its own status/latency
+// (mirrors the spec's Trade Monitoring table). Resolving which slave ticket
+// a CLOSE/MODIFY acts on is a lookup by (slaveId, masterTicket, type=OPEN,
+// status=EXECUTED) — see copy-engine module.
+model CopyOrder {
+  id              String          @id @default(uuid())
+  tradeEventId    String          @map("trade_event_id")
+  tradeEvent      TradeEvent      @relation(fields: [tradeEventId], references: [id])
+  masterId        String          @map("master_id")
+  master          Master          @relation(fields: [masterId], references: [id])
+  slaveId         String          @map("slave_id")
+  slave           Slave           @relation(fields: [slaveId], references: [id])
+  masterTicket    String          @map("master_ticket")
+  type            TradeEventType
+  status          CopyOrderStatus @default(PENDING)
+  requestedVolume Decimal?        @map("requested_volume") @db.Decimal(18, 2)
+  slaveTicket     String?         @map("slave_ticket")
+  executionPrice  Decimal?        @map("execution_price") @db.Decimal(18, 5)
+  errorReason     String?         @map("error_reason")
+  sentAt          DateTime?       @map("sent_at")
+  executedAt      DateTime?       @map("executed_at")
+  createdAt       DateTime        @default(now()) @map("created_at")
+
+  @@unique([tradeEventId, slaveId])
+  @@index([slaveId, masterTicket, status])
+  @@index([masterId])
+  @@map("copy_orders")
 }
 
 model AuditLog {
