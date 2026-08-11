@@ -14,7 +14,21 @@ function isCopyableEvent(event: NormalizedTradeEvent): event is NormalizedTradeE
   return event.type === "OPEN" || event.type === "CLOSE" || event.type === "MODIFY";
 }
 
+let started = false;
+
+// Idempotent: redisSub.on("pmessage", ...) is additive, so calling this
+// more than once against the same connection (e.g. two test files sharing
+// a worker's module cache, or an accidental double-call in production)
+// would otherwise attach a second listener and process every master event
+// twice, tripping the copy_orders (tradeEventId, slaveId) unique
+// constraint. Guarding here is cheap and removes an entire class of bug.
 export function startCopyEngine(): void {
+  if (started) {
+    logger.warn("startCopyEngine() called again; ignoring — already running");
+    return;
+  }
+  started = true;
+
   onSlaveMessage((slaveId, message) => {
     void handleSlaveMessage(slaveId, message).catch((err) =>
       logger.error({ err, slaveId }, "copy engine failed to process slave execution result"),
@@ -51,8 +65,15 @@ async function handleMasterEvent(event: NormalizedTradeEvent): Promise<void> {
     where: { masterId: event.masterId, copyEnabled: true, status: { not: "DISABLED" } },
   });
 
-  for (const slave of slaves) {
-    await copyToSlave(slave.id, tradeEvent.id, event);
+  // Fan out concurrently, not sequentially — with N slaves, a for/await
+  // loop would make the Nth slave wait on the first N-1's DB round trips
+  // before its own even starts. Each copyToSlave() call is independently
+  // scoped by slaveId, so one slave's failure never affects another's.
+  const results = await Promise.allSettled(slaves.map((slave) => copyToSlave(slave.id, tradeEvent.id, event)));
+  for (const [index, result] of results.entries()) {
+    if (result.status === "rejected") {
+      logger.error({ err: result.reason, slaveId: slaves[index]?.id }, "copyToSlave threw unexpectedly");
+    }
   }
 }
 

@@ -73,6 +73,36 @@ implementation instead of two near-identical ones. `copy_orders` has one row
 per `(trade_event, slave)`, not per position, so CLOSE and MODIFY each get
 their own tracked status/latency alongside OPEN.
 
+## Phase 3: multiple Slaves, concurrent fan-out
+
+Scoped narrowly to match the spec's own Phase 3 definition: prove one
+Master event reaching several concurrently connected Slaves, each with a
+fully independent outcome — not PARTIAL_CLOSE or pending orders (still
+Phase 3+, deliberately deferred).
+
+`handleMasterEvent` dispatches to every assigned Slave with
+`Promise.allSettled(slaves.map(slave => copyToSlave(...)))` rather than a
+sequential `for...await` — with N slaves, a sequential loop makes the Nth
+slave's DB round-trips wait on the first N-1 finishing, which is exactly
+the kind of unnecessary serialization the spec calls out. Each
+`copyToSlave()` call was already fully self-contained (its own
+`copy_orders` row, its own prior-ticket lookup scoped by `slaveId`, its own
+WS send), so parallelizing the dispatch loop was the only change needed —
+one Slave's failure or absence can't block or affect another's.
+
+`startCopyEngine()` is now idempotent (a second call is a no-op, logged as
+a warning) — defense in depth against ever double-registering the Redis
+`pmessage` listener, which would otherwise process every master event
+twice. This was actually load-bearing: with multiple integration test
+files each standing up their own full Copy Engine instance against the
+same shared Postgres/Redis (mirroring a topology that should never happen
+in production — there's exactly one Copy Engine instance), running those
+files in parallel caused independent instances to race on the same
+`copy_orders` unique constraint. Fixed by making the test suite run files
+sequentially (`fileParallelism: false` in `vitest.config.ts`) so the tests
+reflect the real single-instance topology, with the idempotency guard as a
+second line of defense.
+
 ## Why the Master and Slave connectors are different technologies
 
 - **Master** needs true event-driven *detection* — the most latency-critical
@@ -93,10 +123,13 @@ reshaping what's here.
 
 ## What's next (not built yet)
 
-- **Phase 3** — multiple Slaves at scale, PARTIAL_CLOSE, pending orders.
+- **PARTIAL_CLOSE and pending orders** — the Master EA already detects
+  these (Phase 1) but the Copy Engine still ignores them
+  (`isCopyableEvent` in `copyEngine.ts`); deliberately deferred out of
+  Phase 3's scope.
 - **Phase 4** — Risk Engine (fixed lot, multiplier, balance/equity
-  proportional, symbol mapping, max lot/drawdown/exposure) — Phase 2 copies
-  volume 1:1 with no risk logic.
+  proportional, symbol mapping, max lot/drawdown/exposure) — volume is
+  still copied 1:1 with no risk logic.
 - **Phase 5** — reconciliation (Master vs. system vs. Slave state).
 - **Phase 6** — Super Admin dashboard (React/TS/Tailwind), WebSocket
   gateway to the browser.

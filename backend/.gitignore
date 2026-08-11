@@ -3,4 +3,5 @@ dist/
 .env
 .dev-connector-token
 .dev-slave-connector-token
+.dev-slave-2-connector-token
 *.log
