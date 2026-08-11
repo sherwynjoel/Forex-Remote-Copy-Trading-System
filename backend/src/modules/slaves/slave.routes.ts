@@ -19,7 +19,9 @@ export async function slaveRoutes(app: FastifyInstance) {
       actor: "admin",
       action: "SLAVE_CREATED",
       entity: `slave:${slave.id}`,
-      newValue: slave,
+      // Round-tripped through JSON so Prisma Decimal fields (multiplier,
+      // minLot, maxLot, lotStep) serialize to plain strings.
+      newValue: JSON.parse(JSON.stringify(slave)),
       ip: request.ip,
     });
 
@@ -55,12 +57,21 @@ export async function slaveRoutes(app: FastifyInstance) {
     if (!existing) return reply.code(404).send({ status: "NOT_FOUND" });
 
     const slave = await prisma.slave.update({ where: { id }, data: parsed.data });
+
+    // Record only the fields that were actually part of this request, with
+    // their before/after values — the spec calls for risk-config changes
+    // to be individually auditable, not just "something changed." Values
+    // are round-tripped through JSON so Prisma Decimal fields serialize to
+    // plain strings rather than being passed as class instances.
+    const changedKeys = Object.keys(parsed.data) as (keyof typeof parsed.data)[];
+    const pick = (source: Record<string, unknown>) =>
+      JSON.parse(JSON.stringify(Object.fromEntries(changedKeys.map((key) => [key, source[key]]))));
     await writeAudit({
       actor: "admin",
       action: "SLAVE_UPDATED",
       entity: `slave:${id}`,
-      oldValue: { copyEnabled: existing.copyEnabled },
-      newValue: { copyEnabled: slave.copyEnabled },
+      oldValue: pick(existing),
+      newValue: pick(slave),
       ip: request.ip,
     });
 

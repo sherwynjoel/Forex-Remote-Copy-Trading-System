@@ -99,10 +99,10 @@ public:
       return false;
      }
 
-   void              SendHeartbeat()
+   void              SendHeartbeat(const string jsonBody = "{}")
      {
       string response;
-      Post("/api/connectors/heartbeat", "{}", response);
+      Post("/api/connectors/heartbeat", jsonBody, response);
      }
 
    // Called from OnTimer(). Backoff is attempts*2 seconds, capped at 60s.

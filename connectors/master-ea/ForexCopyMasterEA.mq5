@@ -56,7 +56,13 @@ void OnTimer()
 
    if(TimeCurrent() - g_lastHeartbeat >= HeartbeatIntervalSeconds)
      {
-      http.SendHeartbeat();
+      // Balance/equity ride on the heartbeat since it already flows every
+      // few seconds — this is the only source of that data for the
+      // backend's BALANCE_PROPORTIONAL / EQUITY_PROPORTIONAL volume sizing.
+      JsonBuilder hb;
+      hb.AddNumber("balance", AccountInfoDouble(ACCOUNT_BALANCE), 2);
+      hb.AddNumber("equity", AccountInfoDouble(ACCOUNT_EQUITY), 2);
+      http.SendHeartbeat(hb.Build());
       g_lastHeartbeat = TimeCurrent();
      }
   }

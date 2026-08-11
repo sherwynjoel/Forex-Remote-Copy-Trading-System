@@ -1,8 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import fp from "fastify-plugin";
 import websocketPlugin from "@fastify/websocket";
+import { z } from "zod";
 import type { WebSocket } from "ws";
-import { authenticateConnector, recordHeartbeat } from "../connectors/connector.service.js";
+import { authenticateConnector, recordHeartbeat, type AccountSnapshot } from "../connectors/connector.service.js";
 import { logger } from "../../config/logger.js";
 
 /**
@@ -33,8 +34,22 @@ export function sendToSlave(slaveId: string, payload: unknown): boolean {
   return true;
 }
 
-function isHeartbeatMessage(message: unknown): boolean {
-  return typeof message === "object" && message !== null && (message as Record<string, unknown>).type === "heartbeat";
+const heartbeatMessageSchema = z.object({
+  type: z.literal("heartbeat"),
+  balance: z.number().nonnegative().optional(),
+  equity: z.number().optional(),
+});
+
+type HeartbeatParseResult = { isHeartbeat: true; accountInfo?: AccountSnapshot } | { isHeartbeat: false };
+
+function parseHeartbeatMessage(message: unknown): HeartbeatParseResult {
+  const parsed = heartbeatMessageSchema.safeParse(message);
+  if (!parsed.success) return { isHeartbeat: false };
+  const { balance, equity } = parsed.data;
+  return {
+    isHeartbeat: true,
+    accountInfo: balance !== undefined && equity !== undefined ? { balance, equity } : undefined,
+  };
 }
 
 // fastify-plugin breaks encapsulation so @fastify/websocket's decorations
@@ -61,8 +76,6 @@ export const registerWsGateway = fp(async function registerWsGateway(app: Fastif
       void recordHeartbeat(connectorId);
 
       socket.on("message", (raw: Buffer) => {
-        void recordHeartbeat(connectorId);
-
         let message: unknown;
         try {
           message = JSON.parse(raw.toString("utf-8"));
@@ -71,7 +84,15 @@ export const registerWsGateway = fp(async function registerWsGateway(app: Fastif
           return;
         }
 
-        if (isHeartbeatMessage(message)) return; // heartbeat already recorded above
+        const heartbeat = parseHeartbeatMessage(message);
+        if (heartbeat.isHeartbeat) {
+          void recordHeartbeat(connectorId, heartbeat.accountInfo);
+          return;
+        }
+
+        // Any inbound message (not just heartbeats) is itself a liveness
+        // signal, so it still refreshes the heartbeat clock.
+        void recordHeartbeat(connectorId);
         messageHandler?.(slaveId, message);
       });
 

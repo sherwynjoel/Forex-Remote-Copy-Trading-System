@@ -164,7 +164,15 @@ async def handle_instruction(instruction: dict) -> dict:
 async def heartbeat_loop(ws) -> None:
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
-        await ws.send(json.dumps({"type": "heartbeat"}))
+        # Balance/equity ride on the heartbeat since it already flows every
+        # few seconds -- this is the only source of that data for the
+        # backend's BALANCE_PROPORTIONAL / EQUITY_PROPORTIONAL volume sizing.
+        payload = {"type": "heartbeat"}
+        account = await asyncio.to_thread(mt5.account_info)
+        if account is not None:
+            payload["balance"] = account.balance
+            payload["equity"] = account.equity
+        await ws.send(json.dumps(payload))
 
 
 async def run_once() -> None:

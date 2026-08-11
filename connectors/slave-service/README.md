@@ -63,14 +63,20 @@ repeat the same OPEN → MODIFY → CLOSE sequence from the top-level README's
 Phase 2 verification steps; the only difference should be a real
 `slaveTicket` and `executionPrice` coming back instead of synthetic ones.
 
-## Known Phase 2 limitations
+As of Phase 4, `heartbeat_loop` also includes this account's current
+`balance`/`equity` (via `mt5.account_info()`) — this is the only source of
+that data for `BALANCE_PROPORTIONAL`/`EQUITY_PROPORTIONAL` volume sizing;
+see [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md). Sizing itself
+(fixed lot / multiplier / balance- or equity-proportional, min/max lot,
+lot-step) is computed entirely on the backend before an instruction is
+ever sent here — this file just executes whatever `volume` it's given.
+
+## Known limitations
 
 - Same symbol name is assumed on both Master and Slave (e.g. both `XAUUSD`)
-  — symbol mapping across brokers is a Phase 4 concern.
-- Volume is copied 1:1 — multiplier/balance-proportional sizing is Phase 4's
-  Risk Engine.
+  — symbol mapping across brokers is still deferred.
 - Only OPEN, CLOSE, and MODIFY are handled — PARTIAL_CLOSE and pending
-  orders are Phase 3+.
+  orders are still deferred.
 - `execute_open`/`execute_close` use `ORDER_FILLING_IOC`; if your broker
   requires a different filling mode you'll see a `retcode` failure in the
   logs — adjust `type_filling` for your broker's requirements.

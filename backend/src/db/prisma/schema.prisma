@@ -50,6 +50,16 @@ enum CopyOrderStatus {
   REJECTED
 }
 
+// Fixed lot, multiplier, and balance/equity-proportional sizing — see
+// modules/copy-engine/volumeCalculator.ts. Percentage-risk sizing is
+// deliberately deferred (out of this phase's scope).
+enum CopyMode {
+  FIXED_LOT
+  MULTIPLIER
+  BALANCE_PROPORTIONAL
+  EQUITY_PROPORTIONAL
+}
+
 model Master {
   id            String       @id @default(uuid())
   name          String
@@ -58,6 +68,10 @@ model Master {
   platform      String       @default("MT5")
   server        String
   status        MasterStatus @default(ACTIVE)
+  // Updated from the Master EA's heartbeat; needed for
+  // BALANCE_PROPORTIONAL / EQUITY_PROPORTIONAL sizing on its Slaves.
+  balance       Decimal?     @map("balance") @db.Decimal(18, 2)
+  equity        Decimal?     @map("equity") @db.Decimal(18, 2)
   createdAt     DateTime     @default(now()) @map("created_at")
 
   connectors  Connector[]
@@ -79,7 +93,21 @@ model Slave {
   server        String
   status        SlaveStatus @default(CONNECTING)
   copyEnabled   Boolean     @default(true) @map("copy_enabled")
-  createdAt     DateTime    @default(now()) @map("created_at")
+
+  // Volume Calculator configuration (spec section 13) — see
+  // modules/copy-engine/volumeCalculator.ts for how these are applied.
+  copyMode   CopyMode @default(MULTIPLIER) @map("copy_mode")
+  fixedLot   Decimal? @map("fixed_lot") @db.Decimal(18, 2)
+  multiplier Decimal  @default(1.0) @map("multiplier") @db.Decimal(10, 4)
+  minLot     Decimal  @default(0.01) @map("min_lot") @db.Decimal(18, 2)
+  maxLot     Decimal  @default(10.0) @map("max_lot") @db.Decimal(18, 2)
+  lotStep    Decimal  @default(0.01) @map("lot_step") @db.Decimal(18, 2)
+
+  // Updated from this Slave's connector heartbeat.
+  balance Decimal? @map("balance") @db.Decimal(18, 2)
+  equity  Decimal? @map("equity") @db.Decimal(18, 2)
+
+  createdAt DateTime @default(now()) @map("created_at")
 
   connectors Connector[]
   copyOrders CopyOrder[]

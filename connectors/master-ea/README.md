@@ -87,5 +87,8 @@ each produces its own event (`MODIFY`, `PARTIAL_CLOSE`, `CLOSE`).
   including the case where the order was actually triggered into a deal
   (which also emits its own `DEAL_ADD` event). The backend reconciles this
   pairing rather than the EA guessing.
-- There is no Slave yet — this EA only proves Master-side detection and
-  transmission, per Phase 1 of the project plan.
+
+As of Phase 4, `OnTimer()`'s heartbeat also includes the account's current
+`balance`/`equity` (via `AccountInfoDouble`) — this is the only source of
+that data for `BALANCE_PROPORTIONAL`/`EQUITY_PROPORTIONAL` volume sizing on
+this Master's Slaves; see [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md).

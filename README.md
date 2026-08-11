@@ -5,12 +5,13 @@ MT5 account to multiple Slave MT5 accounts in real time. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full layered design and
 current build status.
 
-**Status: Phase 3** — Master trade detection/transmission, and Master →
-Backend → Slave copying (OPEN/CLOSE/MODIFY) fanning out concurrently to
-multiple Slaves at once, each with an independent outcome, proven
-end-to-end. No PARTIAL_CLOSE/pending orders, risk/volume logic,
-reconciliation, or dashboard yet (see "What's next" in the architecture
-doc).
+**Status: Phase 4** — Master trade detection/transmission, Master → Backend
+→ Slave copying (OPEN/CLOSE/MODIFY) fanning out concurrently to multiple
+Slaves, and per-Slave volume sizing (fixed lot / multiplier / balance- or
+equity-proportional, with min/max lot and lot-step enforcement) all proven
+end-to-end. No PARTIAL_CLOSE/pending orders, symbol mapping, broader risk
+limits, reconciliation, or dashboard yet (see "What's next" in the
+architecture doc).
 
 ## Repository layout
 
@@ -61,6 +62,33 @@ You should see two rows per event (one per Slave) with distinct
 `simulate:slave` and send another OPEN to confirm that Slave's copy fails
 immediately with `SLAVE_OFFLINE` while the still-connected one still
 succeeds.
+
+### Trying the Volume Calculator
+
+The dev Slaves seeded above default to `MULTIPLIER` with `multiplier=1`
+(1:1 copying). To see sizing actually change the copied volume:
+
+```bash
+curl -X PATCH http://localhost:4000/api/slaves/<slaveId> \
+  -H "Content-Type: application/json" \
+  -d '{"copyMode":"MULTIPLIER","multiplier":0.5}'
+```
+
+Then send another Master OPEN — the fake Slave should receive half the
+Master's volume. For `BALANCE_PROPORTIONAL`/`EQUITY_PROPORTIONAL`, both
+sides need a balance on record first (normally supplied by each
+connector's heartbeat):
+
+```bash
+npm run simulate:master-heartbeat -- --balance 10000 --equity 10000
+# restart simulate:slave with --balance/--equity, e.g.:
+npm run simulate:slave -- --balance 5000 --equity 5000
+```
+
+with the Slave set to `copyMode=BALANCE_PROPORTIONAL`, a Master OPEN of
+`1.0` should size to `0.5` on that Slave. A Slave with `FIXED_LOT` and no
+`fixedLot` configured, or a size that rounds below `minLot`, should fail
+the `copy_orders` row with a reason instead of sending anything.
 
 Run the test suite (requires Postgres/Redis up, as above):
 

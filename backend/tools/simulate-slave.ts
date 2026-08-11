@@ -10,6 +10,7 @@
  *   npm run simulate:slave -- --token <slave-connector-token>
  *   npm run simulate:slave                                      (reads .dev-slave-connector-token)
  *   npm run simulate:slave -- --fail                             (always replies FAILED, for testing)
+ *   npm run simulate:slave -- --balance 5000 --equity 4950        (drives BALANCE_PROPORTIONAL/EQUITY_PROPORTIONAL sizing)
  */
 import { readFile } from "node:fs/promises";
 import WebSocket from "ws";
@@ -50,6 +51,8 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const token = await loadToken(args.token);
   const alwaysFail = args.fail === "true";
+  const balance = args.balance ? Number(args.balance) : 5000;
+  const equity = args.equity ? Number(args.equity) : balance;
 
   const socket = new WebSocket(WS_URL, { headers: { Authorization: `Bearer ${token}` } });
 
@@ -89,7 +92,7 @@ async function main() {
   // doesn't get swept OFFLINE while it's just sitting parked.
   setInterval(() => {
     if (socket.readyState === socket.OPEN) {
-      socket.send(JSON.stringify({ type: "heartbeat" }));
+      socket.send(JSON.stringify({ type: "heartbeat", balance, equity }));
     }
   }, 5000);
 }

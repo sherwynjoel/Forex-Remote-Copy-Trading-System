@@ -11,7 +11,7 @@ REAL-TIME TRANSPORT (Redis pub/sub master:*:events, WebSocket /ws/slave)
        |
 COPY ENGINE
        |
-RISK ENGINE (Phase 4)
+VOLUME CALCULATOR (fixed/multiplier/balance/equity sizing, min/max/step)
        |
 EXECUTION (Slave connector)
        |
@@ -103,6 +103,49 @@ sequentially (`fileParallelism: false` in `vitest.config.ts`) so the tests
 reflect the real single-instance topology, with the idempotency guard as a
 second line of defense.
 
+## Phase 4: Volume Calculator
+
+Scoped to exactly the spec's own Phase 4 list — fixed lot, multiplier,
+balance-proportional, equity-proportional sizing, plus min/max lot and
+lot-step enforcement (grouped with volume calc in the spec, not the
+separate risk-limits section: a computed size is meaningless without
+clamping it to what the broker will accept). Symbol mapping and the
+broader risk limits (max daily loss/drawdown/positions/exposure, emergency
+stop) are explicitly deferred.
+
+Planning surfaced a foundational gap: balance-proportional and
+equity-proportional sizing need real account numbers, and neither Master
+nor Slave balance/equity was tracked anywhere. Both now ride on the
+heartbeat each connector already sends every few seconds —
+`connector.service.ts::recordHeartbeat(connectorId, accountInfo?)` persists
+`{balance, equity}` to whichever entity (`masters` or `slaves`) the
+connector belongs to, via the Master's `POST /api/connectors/heartbeat`
+body or the Slave's `{"type":"heartbeat","balance":...,"equity":...}` WS
+message.
+
+`modules/copy-engine/volumeCalculator.ts` is a pure function — no I/O,
+easy to unit test directly:
+
+```
+calculateVolume({ copyMode, masterVolume, fixedLot, multiplier,
+                   masterBalance, masterEquity, slaveBalance, slaveEquity,
+                   minLot, maxLot, lotStep })
+  FIXED_LOT             -> fixedLot (reject FIXED_LOT_NOT_CONFIGURED if unset)
+  MULTIPLIER            -> masterVolume * multiplier
+  BALANCE_PROPORTIONAL  -> masterVolume * (slaveBalance / masterBalance)
+  EQUITY_PROPORTIONAL   -> masterVolume * (slaveEquity / masterEquity)
+    (reject MASTER_*_UNKNOWN / SLAVE_*_UNKNOWN if either side is missing)
+  -> round DOWN to lotStep (never up), clamp to maxLot (cap, not reject)
+  -> reject BELOW_MIN_LOT if the clamped result is still under minLot
+```
+
+Wired into `copyEngine.ts`'s `copyToSlave` for `OPEN` events only — `CLOSE`
+always closes the Slave's existing full position and `MODIFY` doesn't
+involve volume, so neither needs sizing. A rejection creates the
+`copy_orders` row straight to `FAILED` with the calculator's reason and
+never sends an instruction, the same pattern already used for
+`NO_MATCHING_OPEN_COPY` and `SLAVE_OFFLINE`.
+
 ## Why the Master and Slave connectors are different technologies
 
 - **Master** needs true event-driven *detection* — the most latency-critical
@@ -117,9 +160,11 @@ second line of defense.
 ## Data model
 
 `masters`, `connectors`, `trade_events`, `audit_logs`, `slaves`,
-`copy_orders` — see `backend/src/db/prisma/schema.prisma`. Later phases add
-`execution_logs`, `risk_settings`, `symbol_mappings` on top, without
-reshaping what's here.
+`copy_orders` — see `backend/src/db/prisma/schema.prisma`. `masters` and
+`slaves` also carry `balance`/`equity` (heartbeat-updated); `slaves` carries
+its Volume Calculator config (`copyMode`, `fixedLot`, `multiplier`,
+`minLot`, `maxLot`, `lotStep`). Later phases add `execution_logs`,
+`risk_settings`, `symbol_mappings` on top, without reshaping what's here.
 
 ## What's next (not built yet)
 
@@ -127,9 +172,10 @@ reshaping what's here.
   these (Phase 1) but the Copy Engine still ignores them
   (`isCopyableEvent` in `copyEngine.ts`); deliberately deferred out of
   Phase 3's scope.
-- **Phase 4** — Risk Engine (fixed lot, multiplier, balance/equity
-  proportional, symbol mapping, max lot/drawdown/exposure) — volume is
-  still copied 1:1 with no risk logic.
+- **Symbol mapping and the broader risk limits** — max daily loss/drawdown/
+  positions/exposure, allowed/blocked symbols, emergency stop, percentage-
+  risk sizing. Master and Slave are still assumed to use identical symbol
+  names.
 - **Phase 5** — reconciliation (Master vs. system vs. Slave state).
 - **Phase 6** — Super Admin dashboard (React/TS/Tailwind), WebSocket
   gateway to the browser.

@@ -69,7 +69,19 @@ export async function registerConnector(owner: ConnectorOwner, version?: string)
   return { connectorId: connector.id, token };
 }
 
-export async function recordHeartbeat(connectorId: string): Promise<void> {
+export interface AccountSnapshot {
+  balance: number;
+  equity: number;
+}
+
+/**
+ * Records a heartbeat and, if the connector reported one, the account's
+ * current balance/equity — the only source of that data (needed for
+ * BALANCE_PROPORTIONAL / EQUITY_PROPORTIONAL volume sizing; see
+ * modules/copy-engine/volumeCalculator.ts). Written to whichever entity
+ * (Master or Slave) this connector belongs to.
+ */
+export async function recordHeartbeat(connectorId: string, accountInfo?: AccountSnapshot): Promise<void> {
   const now = new Date();
   await redis.set(
     `connector:${connectorId}:heartbeat`,
@@ -77,10 +89,24 @@ export async function recordHeartbeat(connectorId: string): Promise<void> {
     "EX",
     env.CONNECTOR_OFFLINE_THRESHOLD_SECONDS * 2,
   );
-  await prisma.connector.update({
+  const connector = await prisma.connector.update({
     where: { id: connectorId },
     data: { lastHeartbeatAt: now, status: "ONLINE" },
   });
+
+  if (!accountInfo) return;
+
+  if (connector.masterId) {
+    await prisma.master.update({
+      where: { id: connector.masterId },
+      data: { balance: accountInfo.balance, equity: accountInfo.equity },
+    });
+  } else if (connector.slaveId) {
+    await prisma.slave.update({
+      where: { id: connector.slaveId },
+      data: { balance: accountInfo.balance, equity: accountInfo.equity },
+    });
+  }
 }
 
 /**

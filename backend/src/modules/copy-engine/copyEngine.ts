@@ -1,9 +1,11 @@
+import type { Slave } from "@prisma/client";
 import { prisma } from "../../db/client.js";
 import { redisSub } from "../../config/redis.js";
 import { logger } from "../../config/logger.js";
 import { onSlaveMessage, sendToSlave, isSlaveConnected } from "../realtime/wsGateway.js";
 import { executionResultSchema, type CopyAction, type CopyInstruction } from "../../types/copyOrder.js";
 import type { NormalizedTradeEvent } from "../../types/tradeEvent.js";
+import { calculateVolume } from "./volumeCalculator.js";
 
 const MASTER_EVENTS_PATTERN = "master:*:events";
 
@@ -65,11 +67,27 @@ async function handleMasterEvent(event: NormalizedTradeEvent): Promise<void> {
     where: { masterId: event.masterId, copyEnabled: true, status: { not: "DISABLED" } },
   });
 
+  // Volume sizing needs the Master's account snapshot; fetched once here
+  // (kept fresh by the Master EA's heartbeat — see connector.service.ts)
+  // rather than once per slave, since it's the same for every slave in
+  // this fan-out.
+  const master = await prisma.master.findUnique({
+    where: { id: event.masterId },
+    select: { balance: true, equity: true },
+  });
+
   // Fan out concurrently, not sequentially — with N slaves, a for/await
   // loop would make the Nth slave wait on the first N-1's DB round trips
   // before its own even starts. Each copyToSlave() call is independently
   // scoped by slaveId, so one slave's failure never affects another's.
-  const results = await Promise.allSettled(slaves.map((slave) => copyToSlave(slave.id, tradeEvent.id, event)));
+  const results = await Promise.allSettled(
+    slaves.map((slave) =>
+      copyToSlave(slave, tradeEvent.id, event, {
+        masterBalance: master?.balance ? Number(master.balance) : null,
+        masterEquity: master?.equity ? Number(master.equity) : null,
+      }),
+    ),
+  );
   for (const [index, result] of results.entries()) {
     if (result.status === "rejected") {
       logger.error({ err: result.reason, slaveId: slaves[index]?.id }, "copyToSlave threw unexpectedly");
@@ -77,8 +95,15 @@ async function handleMasterEvent(event: NormalizedTradeEvent): Promise<void> {
   }
 }
 
-async function copyToSlave(slaveId: string, tradeEventId: string, event: NormalizedTradeEvent & { type: CopyAction }): Promise<void> {
+async function copyToSlave(
+  slave: Slave,
+  tradeEventId: string,
+  event: NormalizedTradeEvent & { type: CopyAction },
+  masterAccount: { masterBalance: number | null; masterEquity: number | null },
+): Promise<void> {
+  const slaveId = slave.id;
   let slaveTicket: string | undefined;
+  let volume = event.volume;
 
   if (event.type === "CLOSE" || event.type === "MODIFY") {
     const priorOpen = await prisma.copyOrder.findFirst({
@@ -102,6 +127,41 @@ async function copyToSlave(slaveId: string, tradeEventId: string, event: Normali
       return;
     }
     slaveTicket = priorOpen.slaveTicket;
+  } else if (event.type === "OPEN") {
+    // Only OPEN needs sizing — CLOSE always closes the Slave's existing
+    // full position (see slave-service/main.py::execute_close) and MODIFY
+    // doesn't involve volume at all.
+    const sizing = calculateVolume({
+      copyMode: slave.copyMode,
+      masterVolume: event.volume ?? 0,
+      fixedLot: slave.fixedLot ? Number(slave.fixedLot) : null,
+      multiplier: Number(slave.multiplier),
+      masterBalance: masterAccount.masterBalance,
+      masterEquity: masterAccount.masterEquity,
+      slaveBalance: slave.balance ? Number(slave.balance) : null,
+      slaveEquity: slave.equity ? Number(slave.equity) : null,
+      minLot: Number(slave.minLot),
+      maxLot: Number(slave.maxLot),
+      lotStep: Number(slave.lotStep),
+    });
+
+    if ("rejected" in sizing) {
+      await prisma.copyOrder.create({
+        data: {
+          tradeEventId,
+          masterId: event.masterId,
+          slaveId,
+          masterTicket: event.masterTicket,
+          type: event.type,
+          status: "FAILED",
+          requestedVolume: event.volume,
+          errorReason: sizing.reason,
+        },
+      });
+      logger.warn({ slaveId, masterTicket: event.masterTicket, reason: sizing.reason }, "volume calculator rejected the trade");
+      return;
+    }
+    volume = sizing.volume;
   }
 
   const copyOrder = await prisma.copyOrder.create({
@@ -112,7 +172,7 @@ async function copyToSlave(slaveId: string, tradeEventId: string, event: Normali
       masterTicket: event.masterTicket,
       type: event.type,
       status: "PENDING",
-      requestedVolume: event.volume,
+      requestedVolume: volume,
     },
   });
 
@@ -130,7 +190,7 @@ async function copyToSlave(slaveId: string, tradeEventId: string, event: Normali
     action: event.type,
     symbol: event.symbol,
     side: event.side,
-    volume: event.volume,
+    volume,
     sl: event.sl,
     tp: event.tp,
     slaveTicket,
