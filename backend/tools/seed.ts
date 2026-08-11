@@ -10,7 +10,9 @@
 import { writeFile } from "node:fs/promises";
 import { prisma } from "../src/db/client.js";
 import { redis, redisSub } from "../src/config/redis.js";
+import { env } from "../src/config/env.js";
 import { registerConnector } from "../src/modules/connectors/connector.service.js";
+import { createAdmin } from "../src/modules/auth/auth.service.js";
 
 const DEV_MASTER_ACCOUNT_NUMBER = "DEV-MASTER-001";
 const MASTER_TOKEN_FILE = ".dev-connector-token";
@@ -21,6 +23,14 @@ const DEV_SLAVES = [
 ];
 
 async function main() {
+  const existingAdmin = await prisma.admin.findUnique({ where: { username: env.ADMIN_USERNAME } });
+  if (!existingAdmin) {
+    await createAdmin(env.ADMIN_USERNAME, env.ADMIN_PASSWORD);
+    console.log(`Created admin "${env.ADMIN_USERNAME}" (password from ADMIN_PASSWORD env var — change it for anything beyond local dev)`);
+  } else {
+    console.log(`Reusing existing admin "${env.ADMIN_USERNAME}"`);
+  }
+
   let master = await prisma.master.findUnique({ where: { accountNumber: DEV_MASTER_ACCOUNT_NUMBER } });
 
   if (!master) {

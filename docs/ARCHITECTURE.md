@@ -254,6 +254,98 @@ immediately to the administrator" resolves to before there's a dashboard
 (`GET /api/reconciliation/findings`, plus `POST /api/reconciliation/run`
 to trigger an off-cycle run).
 
+## Phase 6: Super Admin Dashboard (MVP)
+
+Scoped to the spec's "operational core" (§33-34): login, an overview, a
+Masters list/detail, a Slaves list/detail with pause/resume and
+volume/risk config editing, and a real-time Live Trades monitor. Trade
+History, a Symbol Mapping UI, a Reconciliation Findings viewer, Audit
+Logs, and Settings are explicitly deferred.
+
+**Required prerequisite, not optional**: before this phase there was zero
+authentication anywhere in the backend — every admin API was wide open.
+Shipping a control UI on top of that would let anyone who finds the URL
+pause a Slave, flip the emergency stop, or edit risk config. A minimal
+single Super Admin login (JWT) now gates the admin API, completely
+separate from the connector-token auth Masters/Slaves already use:
+
+```
+POST /api/auth/login {username, password}
+  -> bcrypt.compare against admins.password_hash
+  -> jsonwebtoken.sign({adminId, username}, JWT_SECRET, {expiresIn: JWT_EXPIRES_IN})
+
+requireAdminAuth (preHandler, app.ts wraps masters/slaves/reconciliation/
+                  dashboard/copy-orders/ws-admin in one nested Fastify
+                  scope with this hook — ingest/connector/ws-slave routes
+                  are untouched, still connector-token-only)
+  -> Authorization: Bearer <jwt>, OR ?token=<jwt> query param
+     (browsers' native WebSocket API cannot set custom headers, so
+     /ws/admin needs the query-param fallback — a real production
+     requirement, not a test workaround)
+  -> jwt.verify, 401 on anything invalid/missing/expired
+```
+
+`tools/seed.ts` bootstraps a default Admin from `ADMIN_USERNAME`/
+`ADMIN_PASSWORD` env vars if none exists yet (idempotent) — documented as
+insecure dev-only defaults that must change for anything beyond local dev.
+
+**Two smaller foundational gaps found during planning**, both cheap fixes
+bundled in rather than deferred:
+- Per-event latency (`detectionLatencyMs`/`networkLatencyMs`/
+  `totalLatencyMs`, already computed in Phase 1's ingest path) was only
+  logged, never stored — there was no queryable data for the dashboard's
+  "AVG LATENCY" card. `trade_events` gained the three columns, populated
+  from the same `latency` object `ingest.routes.ts` already computes.
+- There was no general-purpose endpoint to list recent `copy_orders` at
+  all (only single-entity lookups and reconciliation findings existed) —
+  needed for the Live Trades page's initial load before real-time updates
+  start arriving. `GET /api/copy-orders?masterId=&slaveId=&limit=`
+  (default 100, max 500, newest first) fills that gap, joined through to
+  `trade_event` (symbol/side) and master/slave (names).
+
+`GET /api/dashboard/summary` returns the spec §16 card set in one call
+(counts by Master/Slave status, trades today, success rate, avg latency)
+rather than the frontend making eight separate requests.
+
+**Real-time is scoped to Live Trades only** — everything else in the MVP
+(Masters/Slaves lists, dashboard summary) polls every ~7s rather than
+pushing. The spec's "no polling" principle is about the trade *execution*
+path (Phase 1-5); it doesn't extend to admin-UI refresh cadence, so this
+is a deliberate MVP simplification, not a compromise of anything already
+built.
+
+```
+copyEngine.ts, at the same points it already writes a copy_orders row
+(failCopyOrder, the PENDING->SENT/SEND_FAILED transition, and
+handleSlaveMessage's EXECUTED/FAILED update)
+  -> broadcastToAdmins({copyId, masterId, slaveId, masterTicket, type,
+                         status, symbol, side, volume, slaveTicket?,
+                         executionPrice?, errorReason?, timestamp})
+
+adminWsGateway.ts: GET /ws/admin (admin-JWT-authenticated)
+  -> every connected browser gets every event (broadcast, not the 1:1
+     routing /ws/slave uses for Slave connectors)
+```
+
+Frontend (`frontend/`): Vite + React + TypeScript + Tailwind CSS — the
+stack the spec names. A thin `apiFetch` wrapper attaches the JWT and logs
+the user out globally on any 401; `useAdminTradeFeed` wraps `/ws/admin`
+with auto-reconnect; `usePolling` drives every non-realtime page. One
+gotcha documented directly in `frontend/src/lib/types.ts`: Prisma
+`Decimal` columns (balance, equity, volumes, exposure) serialize to
+**strings** in JSON, not numbers — every display/edit path has to
+`Number(...)` them first.
+
+Verified live (not just type-checked/unit-tested): logged in, confirmed
+each page renders real backend data, toggled a Slave's pause/resume from
+the UI and confirmed `copy_enabled` flipped directly in Postgres, and
+fired a simulated Master trade while watching it arrive on the Live
+Trades page over the WebSocket in real time — one Slave correctly showing
+`SLAVE_OFFLINE`, the other `SENT` -> `EXECUTED`. Confirmed the ingest/
+connector/`/ws/slave` paths remain fully unauthenticated by the admin JWT
+(a separate auth system) while every admin route correctly 401s without
+one.
+
 ## Why the Master and Slave connectors are different technologies
 
 - **Master** needs true event-driven *detection* — the most latency-critical
@@ -268,15 +360,18 @@ to trigger an off-cycle run).
 ## Data model
 
 `masters`, `connectors`, `trade_events`, `audit_logs`, `slaves`,
-`copy_orders`, `symbol_mappings`, `reconciliation_findings` — see
-`backend/src/db/prisma/schema.prisma`. `masters` and `slaves` also carry
-`balance`/`equity` and `positionSnapshot`/`positionSnapshotAt`
+`copy_orders`, `symbol_mappings`, `reconciliation_findings`, `admins` —
+see `backend/src/db/prisma/schema.prisma`. `masters` and `slaves` also
+carry `balance`/`equity` and `positionSnapshot`/`positionSnapshotAt`
 (heartbeat-updated); `slaves` carries its Volume Calculator config
 (`copyMode`, `fixedLot`, `multiplier`, `minLot`, `maxLot`, `lotStep`) and
 risk config (`emergencyStop`, `allowedSymbols`, `blockedSymbols`,
-`maxPositions`, `maxExposure`). Later work adds `execution_logs`,
-`risk_settings` (max daily loss/drawdown) on top, without reshaping what's
-here.
+`maxPositions`, `maxExposure`); `trade_events` carries the per-event
+latency breakdown (`detectionLatencyMs`, `networkLatencyMs`,
+`totalLatencyMs`); `admins` (`username`, `passwordHash`) backs the Super
+Admin login (Phase 6), a single-credential system with no roles/RBAC yet.
+Later work adds `execution_logs`, `risk_settings` (max daily loss/
+drawdown) on top, without reshaping what's here.
 
 ## What's next (not built yet)
 
@@ -290,8 +385,10 @@ here.
 - **Automatic remediation of reconciliation findings** — detection +
   visibility only, per spec; no auto-fix. A historical findings trend
   (today's table holds only current state).
-- **Phase 6** — Super Admin dashboard (React/TS/Tailwind), WebSocket
-  gateway to the browser.
+- **Dashboard, beyond the Phase 6 MVP** — Trade History, a Symbol Mapping
+  UI, a Reconciliation Findings viewer, Audit Logs viewer, Settings page,
+  real-time push for Masters/Slaves/dashboard summary (currently polling),
+  Latency Monitor charts, multi-user/RBAC (still one shared credential).
 - **Phase 7/8** — load testing, production deployment.
 
 Each of these gets its own short plan before implementation, per the

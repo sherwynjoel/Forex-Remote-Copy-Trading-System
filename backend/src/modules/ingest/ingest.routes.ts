@@ -67,6 +67,6 @@ export async function ingestRoutes(app: FastifyInstance) {
 
     // Fire-and-forget: persistence must not add latency to the connector's
     // response, but failures still need to surface in logs.
-    void persistTradeEvent(event);
+    void persistTradeEvent(event, latency);
   });
 }

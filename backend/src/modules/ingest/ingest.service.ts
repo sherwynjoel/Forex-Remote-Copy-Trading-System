@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../db/client.js";
 import { logger } from "../../config/logger.js";
-import type { NormalizedTradeEvent } from "../../types/tradeEvent.js";
+import type { NormalizedTradeEvent, LatencyBreakdown } from "../../types/tradeEvent.js";
 
 /**
  * Persists a trade event to Postgres. Called after the response has already
@@ -9,7 +9,7 @@ import type { NormalizedTradeEvent } from "../../types/tradeEvent.js";
  * A unique constraint on event_id is the last line of defense against
  * duplicates if two requests raced past the Redis idempotency check.
  */
-export async function persistTradeEvent(event: NormalizedTradeEvent): Promise<void> {
+export async function persistTradeEvent(event: NormalizedTradeEvent, latency: LatencyBreakdown): Promise<void> {
   try {
     await prisma.tradeEvent.create({
       data: {
@@ -27,6 +27,11 @@ export async function persistTradeEvent(event: NormalizedTradeEvent): Promise<vo
         masterEventTime: new Date(event.masterEventTime),
         eaSentTime: new Date(event.eaSentTime),
         backendReceivedTime: new Date(event.backendReceivedTime),
+        // Stored so the dashboard's latency card/monitor has real data to
+        // query — previously computed here but only ever logged.
+        detectionLatencyMs: latency.detectionLatencyMs,
+        networkLatencyMs: latency.networkLatencyMs,
+        totalLatencyMs: latency.totalLatencyMs,
       },
     });
   } catch (err) {

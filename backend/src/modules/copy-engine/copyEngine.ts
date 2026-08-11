@@ -3,6 +3,7 @@ import { prisma } from "../../db/client.js";
 import { redisSub } from "../../config/redis.js";
 import { logger } from "../../config/logger.js";
 import { onSlaveMessage, sendToSlave, isSlaveConnected } from "../realtime/wsGateway.js";
+import { broadcastToAdmins } from "../realtime/adminWsGateway.js";
 import { executionResultSchema, type CopyAction, type CopyInstruction } from "../../types/copyOrder.js";
 import type { NormalizedTradeEvent } from "../../types/tradeEvent.js";
 import { calculateVolume } from "./volumeCalculator.js";
@@ -98,6 +99,29 @@ async function handleMasterEvent(event: NormalizedTradeEvent): Promise<void> {
   }
 }
 
+/**
+ * Pushes a copy_orders transition to any connected admin dashboards (Live
+ * Trades page) — a thin, best-effort side channel, not the source of
+ * truth (Postgres is). Includes symbol/side from the trade event context
+ * so the frontend doesn't need a join for the common case.
+ */
+function broadcastCopyOrder(params: {
+  copyId: string;
+  masterId: string;
+  slaveId: string;
+  masterTicket: string;
+  type: TradeEventType;
+  status: string;
+  symbol: string;
+  side?: string;
+  volume?: number | null;
+  slaveTicket?: string | null;
+  executionPrice?: number | null;
+  errorReason?: string | null;
+}): void {
+  broadcastToAdmins({ ...params, timestamp: new Date().toISOString() });
+}
+
 /** Creates a copy_orders row that goes straight to FAILED — used for every rejection that happens before an instruction is ever sent. */
 async function failCopyOrder(params: {
   tradeEventId: string;
@@ -107,8 +131,10 @@ async function failCopyOrder(params: {
   type: TradeEventType;
   reason: string;
   requestedVolume?: number;
+  symbol: string;
+  side?: string;
 }): Promise<void> {
-  await prisma.copyOrder.create({
+  const copyOrder = await prisma.copyOrder.create({
     data: {
       tradeEventId: params.tradeEventId,
       masterId: params.masterId,
@@ -121,6 +147,18 @@ async function failCopyOrder(params: {
     },
   });
   logger.warn({ slaveId: params.slaveId, masterTicket: params.masterTicket, reason: params.reason }, "copy order failed before send");
+  broadcastCopyOrder({
+    copyId: copyOrder.id,
+    masterId: params.masterId,
+    slaveId: params.slaveId,
+    masterTicket: params.masterTicket,
+    type: params.type,
+    status: "FAILED",
+    symbol: params.symbol,
+    side: params.side,
+    volume: params.requestedVolume,
+    errorReason: params.reason,
+  });
 }
 
 async function copyToSlave(
@@ -151,6 +189,8 @@ async function copyToSlave(
         masterTicket: event.masterTicket,
         type: event.type,
         reason: "NO_MATCHING_OPEN_COPY",
+        symbol: event.symbol,
+        side: event.side,
       });
       return;
     }
@@ -174,6 +214,8 @@ async function copyToSlave(
         masterTicket: event.masterTicket,
         type: event.type,
         reason: entryCheck.reason,
+        symbol: event.symbol,
+        side: event.side,
       });
       return;
     }
@@ -204,6 +246,8 @@ async function copyToSlave(
         type: event.type,
         reason: sizing.reason,
         requestedVolume: event.volume,
+        symbol: event.symbol,
+        side: event.side,
       });
       return;
     }
@@ -222,6 +266,8 @@ async function copyToSlave(
         type: event.type,
         reason: exposureCheck.reason,
         requestedVolume: sizing.volume,
+        symbol: event.symbol,
+        side: event.side,
       });
       return;
     }
@@ -247,6 +293,18 @@ async function copyToSlave(
       data: { status: "FAILED", errorReason: "SLAVE_OFFLINE" },
     });
     logger.warn({ slaveId, copyId: copyOrder.id }, "slave offline, copy order failed immediately");
+    broadcastCopyOrder({
+      copyId: copyOrder.id,
+      masterId: event.masterId,
+      slaveId,
+      masterTicket: event.masterTicket,
+      type: event.type,
+      status: "FAILED",
+      symbol: event.symbol,
+      side: event.side,
+      volume,
+      errorReason: "SLAVE_OFFLINE",
+    });
     return;
   }
 
@@ -266,6 +324,19 @@ async function copyToSlave(
     where: { id: copyOrder.id },
     data: sent ? { status: "SENT", sentAt: new Date() } : { status: "FAILED", errorReason: "SEND_FAILED" },
   });
+  broadcastCopyOrder({
+    copyId: copyOrder.id,
+    masterId: event.masterId,
+    slaveId,
+    masterTicket: event.masterTicket,
+    type: event.type,
+    status: sent ? "SENT" : "FAILED",
+    symbol: event.symbol,
+    side: event.side,
+    volume,
+    slaveTicket,
+    errorReason: sent ? undefined : "SEND_FAILED",
+  });
 }
 
 async function handleSlaveMessage(slaveId: string, rawMessage: unknown): Promise<void> {
@@ -276,7 +347,10 @@ async function handleSlaveMessage(slaveId: string, rawMessage: unknown): Promise
   }
   const result = parsed.data;
 
-  const copyOrder = await prisma.copyOrder.findUnique({ where: { id: result.copyId } });
+  const copyOrder = await prisma.copyOrder.findUnique({
+    where: { id: result.copyId },
+    include: { tradeEvent: { select: { symbol: true, side: true } } },
+  });
   if (!copyOrder || copyOrder.slaveId !== slaveId) {
     logger.warn({ slaveId, copyId: result.copyId }, "execution result for unknown/mismatched copy order");
     return;
@@ -294,4 +368,18 @@ async function handleSlaveMessage(slaveId: string, rawMessage: unknown): Promise
   });
 
   logger.info({ copyId: result.copyId, slaveId, status: result.status }, "copy order execution result recorded");
+  broadcastCopyOrder({
+    copyId: copyOrder.id,
+    masterId: copyOrder.masterId,
+    slaveId,
+    masterTicket: copyOrder.masterTicket,
+    type: copyOrder.type,
+    status: result.status,
+    symbol: copyOrder.tradeEvent.symbol,
+    side: copyOrder.tradeEvent.side ?? undefined,
+    volume: copyOrder.requestedVolume ? Number(copyOrder.requestedVolume) : undefined,
+    slaveTicket: result.slaveTicket ?? copyOrder.slaveTicket ?? undefined,
+    executionPrice: result.executionPrice,
+    errorReason: result.reason,
+  });
 }

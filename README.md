@@ -9,16 +9,22 @@ current build status.
 copying (OPEN/CLOSE/MODIFY) fanning out concurrently to multiple Slaves,
 per-Slave volume sizing (fixed lot / multiplier / balance- or
 equity-proportional), per-Slave symbol mapping, risk limits (allowed/
-blocked symbols, max positions, max exposure, emergency stop), and
-periodic Master/system/Slave reconciliation all proven end-to-end. No
-PARTIAL_CLOSE/pending orders, max daily loss/drawdown, or dashboard yet
-(see "What's next" in the architecture doc).
+blocked symbols, max positions, max exposure, emergency stop), periodic
+Master/system/Slave reconciliation, and a JWT-authenticated Super Admin
+dashboard (login, live overview, Masters/Slaves management, real-time
+Live Trades) all proven end-to-end. No PARTIAL_CLOSE/pending orders, max
+daily loss/drawdown, or the dashboard's deferred pages (Trade History,
+Symbol Mapping UI, Reconciliation viewer, Audit Logs, Settings) yet (see
+"What's next" in the architecture doc).
 
 ## Repository layout
 
 - `backend/` — Node.js + TypeScript API (Fastify), PostgreSQL (Prisma),
-  Redis. Ingest endpoint, connector auth, Copy Engine, and the
-  Master/Slave real-time transport layer all live here.
+  Redis. Ingest endpoint, connector auth, Copy Engine, admin auth/API, and
+  the Master/Slave real-time transport layer all live here.
+- `frontend/` — Vite + React + TypeScript + Tailwind Super Admin
+  dashboard: login, live overview, Masters/Slaves management, real-time
+  Live Trades.
 - `connectors/master-ea/` — the MQL5 Expert Advisor that runs on the Master
   MT5 terminal.
 - `connectors/slave-service/` — the Python service that runs on each Slave
@@ -36,7 +42,7 @@ npm run prisma:migrate         # applies the schema
 npm run dev                    # starts the API on :4000
 
 # in another terminal:
-npm run seed                   # creates a dev Master + two dev Slaves, each with a connector token
+npm run seed                   # creates a default Admin + a dev Master + two dev Slaves, each with a connector token
 npm run simulate:slave         # fake Slave 1: connects, waits for instructions
 
 # in a third terminal (a second fake Slave, to see multi-slave fan-out):
@@ -64,6 +70,24 @@ You should see two rows per event (one per Slave) with distinct
 immediately with `SLAVE_OFFLINE` while the still-connected one still
 succeeds.
 
+### Admin API access
+
+`/api/masters`, `/api/slaves`, `/api/reconciliation`, `/api/dashboard`,
+`/api/copy-orders`, and `/ws/admin` all require a Super Admin JWT (the
+ingest/connector/`/ws/slave` routes the EA and Slave service use stay
+unauthenticated by this token — separate system). Get one with the
+default seeded credentials (`ADMIN_USERNAME`/`ADMIN_PASSWORD` in `.env`,
+default `admin`/`admin` — change both for anything beyond local dev):
+
+```bash
+export ADMIN_TOKEN=$(curl -s -X POST http://localhost:4000/api/auth/login \
+  -H "Content-Type: application/json" -d '{"username":"admin","password":"admin"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+```
+
+Every `curl` below against an admin route needs
+`-H "Authorization: Bearer $ADMIN_TOKEN"`.
+
 ### Trying the Volume Calculator
 
 The dev Slaves seeded above default to `MULTIPLIER` with `multiplier=1`
@@ -71,7 +95,7 @@ The dev Slaves seeded above default to `MULTIPLIER` with `multiplier=1`
 
 ```bash
 curl -X PATCH http://localhost:4000/api/slaves/<slaveId> \
-  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
   -d '{"copyMode":"MULTIPLIER","multiplier":0.5}'
 ```
 
@@ -96,16 +120,18 @@ the `copy_orders` row with a reason instead of sending anything.
 ```bash
 # Map XAUUSD to a broker-specific symbol name for one Slave:
 curl -X POST http://localhost:4000/api/slaves/<slaveId>/symbol-mappings \
-  -H "Content-Type: application/json" -d '{"masterSymbol":"XAUUSD","slaveSymbol":"XAUUSDm"}'
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"masterSymbol":"XAUUSD","slaveSymbol":"XAUUSDm"}'
 
 # Block a symbol, cap concurrent positions, cap total exposure, or hit the
 # emergency stop -- all via the same PATCH used for volume config:
 curl -X PATCH http://localhost:4000/api/slaves/<slaveId> \
-  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
   -d '{"blockedSymbols":["XAUUSD"],"maxPositions":5,"maxExposure":2.0}'
 
 curl -X PATCH http://localhost:4000/api/slaves/<slaveId> \
-  -H "Content-Type: application/json" -d '{"emergencyStop":true}'
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"emergencyStop":true}'
 ```
 
 A Master OPEN for `XAUUSD` should arrive at the fake Slave as `XAUUSDm`
@@ -130,13 +156,30 @@ npm run simulate:master-heartbeat -- --positions '[{"ticket":"700001","symbol":"
 npm run simulate:slave -- --drop-position <the slaveTicket the fake slave printed on EXECUTED>
 
 # Trigger a run immediately rather than waiting for the interval:
-curl -X POST http://localhost:4000/api/reconciliation/run
-curl http://localhost:4000/api/reconciliation/findings
+curl -X POST http://localhost:4000/api/reconciliation/run -H "Authorization: Bearer $ADMIN_TOKEN"
+curl http://localhost:4000/api/reconciliation/findings -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
 You should see a `SLAVE_POSITION_MISSING` finding. Fix the Master/Slave
 snapshots to agree and run again — the finding disappears (`findings` only
 ever reflects the *current* known issues, not a history).
+
+### Trying the Super Admin dashboard
+
+```bash
+# in a fifth terminal:
+cd frontend
+cp .env.example .env             # VITE_API_URL=http://localhost:4000
+npm install
+npm run dev                      # serves the dashboard on :5173
+```
+
+Open `http://localhost:5173`, log in with the seeded credentials
+(`admin`/`admin` by default), and you should see live counts on the
+Dashboard page, both dev Slaves on the Slaves page (pause/resume them and
+confirm `copy_enabled` flips — check with the SQL above), and any Master
+trade you send via `npm run simulate` appear on the Live Trades page
+immediately, no refresh needed.
 
 Run the test suite (requires Postgres/Redis up, as above):
 

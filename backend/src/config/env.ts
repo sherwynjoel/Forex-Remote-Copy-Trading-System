@@ -24,6 +24,15 @@ const envSchema = z.object({
   RECONCILIATION_STALENESS_SECONDS: z.coerce.number().int().positive().default(30),
   RECONCILIATION_VOLUME_TOLERANCE: z.coerce.number().positive().default(0.01),
   RECONCILIATION_PRICE_TOLERANCE: z.coerce.number().positive().default(0.0001),
+
+  // Super Admin auth (see modules/auth). The dev default secret/credentials
+  // below are fine for local dev only — anything beyond that must set real
+  // values, since a guessable JWT_SECRET or default password defeats the
+  // entire point of adding auth in the first place.
+  JWT_SECRET: z.string().min(1).default("dev-only-insecure-secret-change-me"),
+  JWT_EXPIRES_IN: z.string().default("12h"),
+  ADMIN_USERNAME: z.string().min(1).default("admin"),
+  ADMIN_PASSWORD: z.string().min(1).default("admin"),
 });
 
 export const env = envSchema.parse(process.env);

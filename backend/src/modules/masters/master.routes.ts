@@ -35,7 +35,7 @@ export async function masterRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const master = await prisma.master.findUnique({
       where: { id },
-      include: { connectors: true },
+      include: { connectors: true, slaves: true },
     });
     if (!master) return reply.code(404).send({ status: "NOT_FOUND" });
     return reply.send(master);

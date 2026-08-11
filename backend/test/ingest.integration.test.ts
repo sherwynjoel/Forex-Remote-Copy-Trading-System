@@ -93,6 +93,11 @@ describe("POST /api/ingest/trade-event", () => {
 
     const rows = await prisma.tradeEvent.findMany({ where: { eventId } });
     expect(rows).toHaveLength(1);
+    // Latency is computed at ingest time either way; persisting it (not just
+    // logging it) is what gives the dashboard's "AVG LATENCY" card real data.
+    expect(rows[0]?.detectionLatencyMs).not.toBeNull();
+    expect(rows[0]?.networkLatencyMs).not.toBeNull();
+    expect(rows[0]?.totalLatencyMs).not.toBeNull();
   });
 
   it("ignores a duplicate event_id and does not create a second row", async () => {

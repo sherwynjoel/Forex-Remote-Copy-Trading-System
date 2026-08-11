@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+@theme {
+  --color-status-online: #16a34a;
+  --color-status-offline: #6b7280;
+  --color-status-error: #dc2626;
+  --color-status-executed: #16a34a;
+  --color-status-failed: #dc2626;
+  --color-status-pending: #d97706;
+}
+
+body {
+  @apply bg-slate-950 text-slate-100 antialiased;
+}
+
+@layer components {
+  .input {
+    @apply w-full rounded border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-slate-100 focus:border-slate-500 focus:outline-none;
+  }
+}

@@ -60,6 +60,18 @@ enum CopyMode {
   EQUITY_PROPORTIONAL
 }
 
+// A single Super Admin credential for now — no multi-user/RBAC yet (spec
+// section 30 describes multiple roles; deferred until there's an actual
+// need for more than one operator). See modules/auth/auth.service.ts.
+model Admin {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("admins")
+}
+
 model Master {
   id            String       @id @default(uuid())
   name          String
@@ -195,6 +207,12 @@ model TradeEvent {
   masterEventTime     DateTime       @map("master_event_time")
   eaSentTime          DateTime       @map("ea_sent_time")
   backendReceivedTime DateTime       @map("backend_received_time")
+  // Computed in ingest.routes.ts (see monitoring/latency.ts) at ingest
+  // time; stored so the dashboard's "AVG LATENCY" card has real data to
+  // query instead of only ever appearing in logs.
+  detectionLatencyMs Int? @map("detection_latency_ms")
+  networkLatencyMs   Int? @map("network_latency_ms")
+  totalLatencyMs     Int? @map("total_latency_ms")
   createdAt           DateTime       @default(now()) @map("created_at")
 
   copyOrders CopyOrder[]
