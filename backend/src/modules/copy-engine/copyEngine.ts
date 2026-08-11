@@ -8,6 +8,7 @@ import type { NormalizedTradeEvent } from "../../types/tradeEvent.js";
 import { calculateVolume } from "./volumeCalculator.js";
 import { checkEntryAllowed, checkExposureAllowed } from "./riskChecks.js";
 import { resolveSlaveSymbol } from "../slaves/symbolMapping.service.js";
+import { getOpenPositionsSummary } from "./copyOrderQueries.js";
 
 const MASTER_EVENTS_PATTERN = "master:*:events";
 
@@ -120,29 +121,6 @@ async function failCopyOrder(params: {
     },
   });
   logger.warn({ slaveId: params.slaveId, masterTicket: params.masterTicket, reason: params.reason }, "copy order failed before send");
-}
-
-/**
- * "Open positions" for a Slave, derived from copy_orders rather than
- * tracked separately: EXECUTED OPENs whose masterTicket has no EXECUTED
- * CLOSE yet. Feeds both maxPositions and maxExposure — fetched once and
- * reused for both checks.
- */
-async function getOpenPositionsSummary(slaveId: string): Promise<{ count: number; totalVolume: number }> {
-  const [opens, closes] = await Promise.all([
-    prisma.copyOrder.findMany({
-      where: { slaveId, type: "OPEN", status: "EXECUTED" },
-      select: { masterTicket: true, requestedVolume: true },
-    }),
-    prisma.copyOrder.findMany({
-      where: { slaveId, type: "CLOSE", status: "EXECUTED" },
-      select: { masterTicket: true },
-    }),
-  ]);
-  const closedTickets = new Set(closes.map((c) => c.masterTicket));
-  const openPositions = opens.filter((o) => !closedTickets.has(o.masterTicket));
-  const totalVolume = openPositions.reduce((sum, o) => sum + (o.requestedVolume ? Number(o.requestedVolume) : 0), 0);
-  return { count: openPositions.length, totalVolume };
 }
 
 async function copyToSlave(

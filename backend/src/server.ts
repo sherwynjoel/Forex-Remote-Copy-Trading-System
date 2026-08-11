@@ -3,6 +3,7 @@ import { env } from "./config/env.js";
 import { logger } from "./config/logger.js";
 import { sweepOfflineConnectors } from "./modules/connectors/connector.service.js";
 import { startCopyEngine } from "./modules/copy-engine/copyEngine.js";
+import { startReconciliationEngine } from "./modules/reconciliation/reconciliation.service.js";
 
 const app = buildApp();
 
@@ -11,6 +12,7 @@ const sweepInterval = setInterval(() => {
 }, 5000);
 
 startCopyEngine();
+startReconciliationEngine();
 
 app
   .listen({ port: env.PORT, host: "0.0.0.0" })

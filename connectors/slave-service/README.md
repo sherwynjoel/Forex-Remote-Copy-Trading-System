@@ -63,18 +63,20 @@ repeat the same OPEN → MODIFY → CLOSE sequence from the top-level README's
 Phase 2 verification steps; the only difference should be a real
 `slaveTicket` and `executionPrice` coming back instead of synthetic ones.
 
-As of Phase 4, `heartbeat_loop` also includes this account's current
-`balance`/`equity` (via `mt5.account_info()`) — this is the only source of
-that data for `BALANCE_PROPORTIONAL`/`EQUITY_PROPORTIONAL` volume sizing;
-see [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md). Sizing itself
-(fixed lot / multiplier / balance- or equity-proportional, min/max lot,
-lot-step) is computed entirely on the backend before an instruction is
-ever sent here — this file just executes whatever `volume` it's given.
+`heartbeat_loop` also includes this account's current `balance`/`equity`
+(via `mt5.account_info()`) — the only source of that data for
+`BALANCE_PROPORTIONAL`/`EQUITY_PROPORTIONAL` volume sizing — plus a full
+open-position snapshot (`build_positions_snapshot()`, via
+`mt5.positions_get()`, including each position's order `comment`) — the
+"Slave state" side of periodic reconciliation (spec §21). See
+[docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md). Sizing and symbol
+translation are both computed entirely on the backend before an
+instruction is ever sent here — `execute_open` just uses whatever
+`symbol`/`volume` it's given, tagging the resulting order with
+`comment=copy:<copyId>` so reconciliation can trace it back later.
 
 ## Known limitations
 
-- Same symbol name is assumed on both Master and Slave (e.g. both `XAUUSD`)
-  — symbol mapping across brokers is still deferred.
 - Only OPEN, CLOSE, and MODIFY are handled — PARTIAL_CLOSE and pending
   orders are still deferred.
 - `execute_open`/`execute_close` use `ORDER_FILLING_IOC`; if your broker

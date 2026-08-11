@@ -6,6 +6,7 @@ import { slaveRoutes } from "./modules/slaves/slave.routes.js";
 import { connectorRoutes } from "./modules/connectors/connector.routes.js";
 import { ingestRoutes } from "./modules/ingest/ingest.routes.js";
 import { registerWsGateway } from "./modules/realtime/wsGateway.js";
+import { reconciliationRoutes } from "./modules/reconciliation/reconciliation.routes.js";
 
 export function buildApp() {
   const app = Fastify({ loggerInstance: logger });
@@ -16,6 +17,7 @@ export function buildApp() {
   app.register(connectorRoutes);
   app.register(ingestRoutes);
   app.register(registerWsGateway);
+  app.register(reconciliationRoutes);
 
   return app;
 }

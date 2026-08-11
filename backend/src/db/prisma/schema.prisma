@@ -72,12 +72,18 @@ model Master {
   // BALANCE_PROPORTIONAL / EQUITY_PROPORTIONAL sizing on its Slaves.
   balance       Decimal?     @map("balance") @db.Decimal(18, 2)
   equity        Decimal?     @map("equity") @db.Decimal(18, 2)
+  // Current open positions as last reported by the EA's heartbeat — the
+  // "Master state" side of reconciliation (spec section 21). See
+  // modules/reconciliation/reconciliationEngine.ts.
+  positionSnapshot   Json?     @map("position_snapshot")
+  positionSnapshotAt DateTime? @map("position_snapshot_at")
   createdAt     DateTime     @default(now()) @map("created_at")
 
-  connectors  Connector[]
-  tradeEvents TradeEvent[]
-  slaves      Slave[]
-  copyOrders  CopyOrder[]
+  connectors             Connector[]
+  tradeEvents            TradeEvent[]
+  slaves                 Slave[]
+  copyOrders             CopyOrder[]
+  reconciliationFindings ReconciliationFinding[]
 
   @@map("masters")
 }
@@ -106,6 +112,13 @@ model Slave {
   // Updated from this Slave's connector heartbeat.
   balance Decimal? @map("balance") @db.Decimal(18, 2)
   equity  Decimal? @map("equity") @db.Decimal(18, 2)
+  // Current open positions as last reported by the Slave service's
+  // heartbeat — the "Slave state" side of reconciliation. Each item
+  // carries the MT5 order comment (copy:<copyId>), which is how
+  // reconciliation traces a Slave position back to the copy that created
+  // it. See modules/reconciliation/reconciliationEngine.ts.
+  positionSnapshot   Json?     @map("position_snapshot")
+  positionSnapshotAt DateTime? @map("position_snapshot_at")
 
   // Risk limits (spec section 15) — all default to "off / no restriction"
   // since these are opt-in guardrails, not always-on caps like maxLot
@@ -120,9 +133,10 @@ model Slave {
 
   createdAt DateTime @default(now()) @map("created_at")
 
-  connectors      Connector[]
-  copyOrders      CopyOrder[]
-  symbolMappings  SymbolMapping[]
+  connectors             Connector[]
+  copyOrders             CopyOrder[]
+  symbolMappings         SymbolMapping[]
+  reconciliationFindings ReconciliationFinding[]
 
   @@index([masterId])
   @@map("slaves")
@@ -219,6 +233,39 @@ model CopyOrder {
   @@index([slaveId, masterTicket, status])
   @@index([masterId])
   @@map("copy_orders")
+}
+
+enum ReconciliationFindingType {
+  MISSING_COPY
+  SLAVE_POSITION_MISSING
+  VOLUME_MISMATCH
+  SLTP_MISMATCH
+  SLAVE_NOT_CLOSED
+  UNEXPECTED_SLAVE_POSITION
+  DUPLICATE_SLAVE_POSITION
+}
+
+// Represents *current* known desync issues for a (Master, Slave) pair —
+// each reconciliation run replaces a pair's findings rather than
+// appending to history (spec section 21's "show this immediately to the
+// administrator" wants current status, not an ever-growing log; a
+// historical trend view is a later, separate concern). See
+// modules/reconciliation/reconciliationEngine.ts.
+model ReconciliationFinding {
+  id           String                    @id @default(uuid())
+  masterId     String                    @map("master_id")
+  master       Master                    @relation(fields: [masterId], references: [id])
+  slaveId      String                    @map("slave_id")
+  slave        Slave                     @relation(fields: [slaveId], references: [id])
+  type         ReconciliationFindingType
+  masterTicket String?                   @map("master_ticket")
+  slaveTicket  String?                   @map("slave_ticket")
+  details      Json
+  detectedAt   DateTime                  @default(now()) @map("detected_at")
+
+  @@index([masterId])
+  @@index([slaveId])
+  @@map("reconciliation_findings")
 }
 
 model AuditLog {

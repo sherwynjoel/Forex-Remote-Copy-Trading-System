@@ -21,6 +21,10 @@ EXECUTION (Slave connector)
 TRADING PLATFORM (MT5)
 ```
 
+Reconciliation (spec §21) sits outside this per-trade flow — it runs on
+its own interval, comparing state after the fact rather than gating any
+single trade. See "Reconciliation" below.
+
 The frontend (Phase 6) will only ever talk to the backend's REST/WebSocket
 API — never directly to MT4/MT5.
 
@@ -188,14 +192,67 @@ checkExposureAllowed(...)  // after sizing — exposure is about the
 ```
 
 "Open positions" (feeding both checks) is derived from `copy_orders`, not
-tracked separately: `getOpenPositionsSummary()` in `copyEngine.ts` finds
-EXECUTED `OPEN`s whose `masterTicket` has no EXECUTED `CLOSE` yet — same
-lookup style already used for the CLOSE/MODIFY prior-ticket resolution.
-Fetched once per `OPEN` and reused for both checks. The repeated "create a
-`copy_orders` row straight to `FAILED` with a reason, never send anything"
-pattern (now four call sites: no matching open copy, volume-calculator
-rejection, entry-risk rejection, exposure rejection) is a single
-`failCopyOrder()` helper rather than copy-pasted.
+tracked separately: `getOpenPositionsSummary()` in
+`modules/copy-engine/copyOrderQueries.ts` finds EXECUTED `OPEN`s whose
+`masterTicket` has no EXECUTED `CLOSE` yet — same lookup style already
+used for the CLOSE/MODIFY prior-ticket resolution. Fetched once per `OPEN`
+and reused for both checks. The repeated "create a `copy_orders` row
+straight to `FAILED` with a reason, never send anything" pattern (now four
+call sites: no matching open copy, volume-calculator rejection, entry-risk
+rejection, exposure rejection) is a single `failCopyOrder()` helper rather
+than copy-pasted.
+
+## Reconciliation
+
+Per spec §21: periodically compares Master state vs. system state vs.
+Slave state and surfaces drift. Everything built before this trusted that
+once `copy_orders` said `EXECUTED`, the Slave's position actually matched
+— nothing ever checked that against reality.
+
+**Foundational gap found during planning**: doing this for real needs each
+platform's *actual current* open positions, not just the event log
+(`trade_events`/`copy_orders`) already collected. Neither connector
+reported that. Rather than add a new endpoint/message type/timer, the
+existing heartbeat (already flowing every ~5s from both connectors,
+already updating `balance`/`equity` in the same write) grew an optional
+`positions` array — `masters`/`slaves` gained `positionSnapshot` (JSON) +
+`positionSnapshotAt`. The *comparison* still runs on its own slower
+interval (`RECONCILIATION_INTERVAL_SECONDS`, default 60); only the *data
+collection* rides the heartbeat.
+
+`modules/reconciliation/reconciliationEngine.ts::compareState()` is pure,
+like `volumeCalculator.ts`/`riskChecks.ts`:
+
+```
+MISSING_COPY               Master has an open position with no open-or-closed copy at all
+SLAVE_POSITION_MISSING     system has an open copy, Slave doesn't have that ticket
+VOLUME_MISMATCH            Slave's actual volume differs from requested beyond RECONCILIATION_VOLUME_TOLERANCE
+SLTP_MISMATCH              Slave's actual SL/TP differs from expected beyond RECONCILIATION_PRICE_TOLERANCE
+                              (expected SL/TP comes from the *latest* EXECUTED OPEN-or-MODIFY
+                               copy for that ticket, not just the original open — a Master
+                               MODIFY changes the expectation)
+SLAVE_NOT_CLOSED            system has a closed copy, but a Slave position with that ticket is still present
+UNEXPECTED_SLAVE_POSITION   a Slave position's order comment doesn't trace back to a known open copy
+DUPLICATE_SLAVE_POSITION    two Slave positions share the same "copy:<copyId>" comment
+```
+
+The `comment` field is the trace-back key: `slave-service/main.py`'s
+`execute_open()` already tags every order `copy:<copyId>` (Phase 2), so
+reconciliation gets duplicate/unexpected detection for free once the
+Slave reports its comments in its snapshot.
+
+Orchestration (`reconciliation.service.ts::runReconciliation()`, called on
+an interval from `server.ts` — same `setInterval` pattern as
+`sweepOfflineConnectors`, and idempotent like `startCopyEngine()`) skips
+any Master/Slave pair whose snapshot is older than
+`RECONCILIATION_STALENESS_SECONDS` (default 30) — a stale snapshot from a
+disconnected connector must never produce a false finding. Findings for a
+pair are **replaced** each run (`deleteMany` then insert): the
+`reconciliation_findings` table represents *current* known issues, not an
+ever-growing history — the queryable surface spec §21's "show this
+immediately to the administrator" resolves to before there's a dashboard
+(`GET /api/reconciliation/findings`, plus `POST /api/reconciliation/run`
+to trigger an off-cycle run).
 
 ## Why the Master and Slave connectors are different technologies
 
@@ -211,14 +268,15 @@ rejection, entry-risk rejection, exposure rejection) is a single
 ## Data model
 
 `masters`, `connectors`, `trade_events`, `audit_logs`, `slaves`,
-`copy_orders`, `symbol_mappings` — see
+`copy_orders`, `symbol_mappings`, `reconciliation_findings` — see
 `backend/src/db/prisma/schema.prisma`. `masters` and `slaves` also carry
-`balance`/`equity` (heartbeat-updated); `slaves` carries its Volume
-Calculator config (`copyMode`, `fixedLot`, `multiplier`, `minLot`,
-`maxLot`, `lotStep`) and risk config (`emergencyStop`, `allowedSymbols`,
-`blockedSymbols`, `maxPositions`, `maxExposure`). Later phases add
-`execution_logs`, `risk_settings` (max daily loss/drawdown) on top,
-without reshaping what's here.
+`balance`/`equity` and `positionSnapshot`/`positionSnapshotAt`
+(heartbeat-updated); `slaves` carries its Volume Calculator config
+(`copyMode`, `fixedLot`, `multiplier`, `minLot`, `maxLot`, `lotStep`) and
+risk config (`emergencyStop`, `allowedSymbols`, `blockedSymbols`,
+`maxPositions`, `maxExposure`). Later work adds `execution_logs`,
+`risk_settings` (max daily loss/drawdown) on top, without reshaping what's
+here.
 
 ## What's next (not built yet)
 
@@ -229,7 +287,9 @@ without reshaping what's here.
 - **Max daily loss and max drawdown** — need a start-of-day equity
   snapshot and a running peak equity, neither tracked yet; deliberately
   deferred rather than approximated. Percentage-risk volume sizing.
-- **Phase 5** — reconciliation (Master vs. system vs. Slave state).
+- **Automatic remediation of reconciliation findings** — detection +
+  visibility only, per spec; no auto-fix. A historical findings trend
+  (today's table holds only current state).
 - **Phase 6** — Super Admin dashboard (React/TS/Tailwind), WebSocket
   gateway to the browser.
 - **Phase 7/8** — load testing, production deployment.

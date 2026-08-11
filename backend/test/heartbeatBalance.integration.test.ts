@@ -59,18 +59,26 @@ describe("Heartbeat balance/equity tracking", () => {
     await prisma.$disconnect();
   });
 
-  it("persists balance/equity from the Master's HTTP heartbeat", async () => {
+  it("persists balance/equity/positions from the Master's HTTP heartbeat", async () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/connectors/heartbeat",
       headers: { authorization: `Bearer ${masterToken}` },
-      payload: { balance: 12345.67, equity: 12000.5 },
+      payload: {
+        balance: 12345.67,
+        equity: 12000.5,
+        positions: [{ ticket: "M1", symbol: "XAUUSD", side: "BUY", volume: 1.0, sl: 3340.2, tp: 3370.2 }],
+      },
     });
     expect(response.statusCode).toBe(200);
 
     const master = await prisma.master.findUnique({ where: { id: masterId } });
     expect(Number(master?.balance)).toBe(12345.67);
     expect(Number(master?.equity)).toBe(12000.5);
+    expect(master?.positionSnapshot).toEqual([
+      { ticket: "M1", symbol: "XAUUSD", side: "BUY", volume: 1.0, sl: 3340.2, tp: 3370.2 },
+    ]);
+    expect(master?.positionSnapshotAt).not.toBeNull();
   });
 
   it("leaves balance/equity untouched when a heartbeat omits them", async () => {
@@ -86,7 +94,7 @@ describe("Heartbeat balance/equity tracking", () => {
     expect(Number(master?.balance)).toBe(12345.67); // unchanged from the previous test
   });
 
-  it("persists balance/equity from the Slave's WS heartbeat message", async () => {
+  it("persists balance/equity/positions from the Slave's WS heartbeat message", async () => {
     const ws = await app.injectWS("/ws/slave", { headers: { authorization: `Bearer ${slaveToken}` } });
     // injectWS() resolves as soon as the client side is connected, which can
     // be before the server's async auth handshake has finished registering
@@ -94,12 +102,23 @@ describe("Heartbeat balance/equity tracking", () => {
     // in copyEngineMultiSlave.integration.test.ts).
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    ws.send(JSON.stringify({ type: "heartbeat", balance: 5432.1, equity: 5400.0 }));
+    ws.send(
+      JSON.stringify({
+        type: "heartbeat",
+        balance: 5432.1,
+        equity: 5400.0,
+        positions: [{ ticket: "S1", symbol: "XAUUSDm", side: "BUY", volume: 1.0, comment: "copy:CP1" }],
+      }),
+    );
     await new Promise((resolve) => setTimeout(resolve, 200));
 
     const slave = await prisma.slave.findUnique({ where: { id: slaveId } });
     expect(Number(slave?.balance)).toBe(5432.1);
     expect(Number(slave?.equity)).toBe(5400.0);
+    expect(slave?.positionSnapshot).toEqual([
+      { ticket: "S1", symbol: "XAUUSDm", side: "BUY", volume: 1.0, comment: "copy:CP1" },
+    ]);
+    expect(slave?.positionSnapshotAt).not.toBeNull();
 
     await new Promise<void>((resolve) => {
       ws.once("close", () => resolve());

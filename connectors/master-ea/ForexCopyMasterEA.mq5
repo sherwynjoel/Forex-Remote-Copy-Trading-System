@@ -56,15 +56,58 @@ void OnTimer()
 
    if(TimeCurrent() - g_lastHeartbeat >= HeartbeatIntervalSeconds)
      {
-      // Balance/equity ride on the heartbeat since it already flows every
-      // few seconds — this is the only source of that data for the
-      // backend's BALANCE_PROPORTIONAL / EQUITY_PROPORTIONAL volume sizing.
+      // Balance/equity/positions ride on the heartbeat since it already
+      // flows every few seconds — this is the only source of that data for
+      // BALANCE_PROPORTIONAL/EQUITY_PROPORTIONAL volume sizing and for
+      // reconciliation's "Master state" (see docs/ARCHITECTURE.md).
       JsonBuilder hb;
       hb.AddNumber("balance", AccountInfoDouble(ACCOUNT_BALANCE), 2);
       hb.AddNumber("equity", AccountInfoDouble(ACCOUNT_EQUITY), 2);
+      hb.AddRaw("positions", BuildPositionsJson());
       http.SendHeartbeat(hb.Build());
       g_lastHeartbeat = TimeCurrent();
      }
+  }
+
+//+------------------------------------------------------------------+
+//| Open-position snapshot for reconciliation — the "Master state"    |
+//| side of the comparison the backend runs periodically.             |
+//+------------------------------------------------------------------+
+string BuildPositionsJson()
+  {
+   string result = "[";
+   int total = PositionsTotal();
+
+   for(int i = 0; i < total; i++)
+     {
+      ulong ticket = PositionGetTicket(i); // also selects it for the calls below
+      if(ticket == 0)
+         continue;
+
+      string symbol = PositionGetString(POSITION_SYMBOL);
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      double sl     = PositionGetDouble(POSITION_SL);
+      double tp     = PositionGetDouble(POSITION_TP);
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      string side = (posType == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+
+      JsonBuilder pos;
+      pos.AddString("ticket", IntegerToString((long)ticket));
+      pos.AddString("symbol", symbol);
+      pos.AddString("side", side);
+      pos.AddNumber("volume", volume, 2);
+      if(sl > 0)
+         pos.AddNumber("sl", sl, 5);
+      if(tp > 0)
+         pos.AddNumber("tp", tp, 5);
+
+      if(result != "[")
+         result += ",";
+      result += pos.Build();
+     }
+
+   result += "]";
+   return result;
   }
 
 //+------------------------------------------------------------------+

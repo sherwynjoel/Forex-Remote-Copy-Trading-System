@@ -161,17 +161,41 @@ async def handle_instruction(instruction: dict) -> dict:
     return await asyncio.to_thread(executor, instruction)
 
 
+def build_positions_snapshot() -> list:
+    """Open-position snapshot for reconciliation -- the "Slave state" side
+    of the comparison the backend runs periodically. `comment` carries the
+    "copy:<copyId>" tag set in execute_open(), which is how reconciliation
+    traces a position back to the copy that created it."""
+    positions = mt5.positions_get()
+    if not positions:
+        return []
+    return [
+        {
+            "ticket": str(p.ticket),
+            "symbol": p.symbol,
+            "side": "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
+            "volume": p.volume,
+            "sl": p.sl,
+            "tp": p.tp,
+            "comment": p.comment,
+        }
+        for p in positions
+    ]
+
+
 async def heartbeat_loop(ws) -> None:
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
-        # Balance/equity ride on the heartbeat since it already flows every
-        # few seconds -- this is the only source of that data for the
-        # backend's BALANCE_PROPORTIONAL / EQUITY_PROPORTIONAL volume sizing.
+        # Balance/equity/positions ride on the heartbeat since it already
+        # flows every few seconds -- this is the only source of that data
+        # for BALANCE_PROPORTIONAL/EQUITY_PROPORTIONAL volume sizing and
+        # for reconciliation's "Slave state".
         payload = {"type": "heartbeat"}
         account = await asyncio.to_thread(mt5.account_info)
         if account is not None:
             payload["balance"] = account.balance
             payload["equity"] = account.equity
+        payload["positions"] = await asyncio.to_thread(build_positions_snapshot)
         await ws.send(json.dumps(payload))
 
 

@@ -6,11 +6,18 @@
  * Python service in connectors/slave-service/ speaks the exact same
  * protocol and is a drop-in replacement once MT5 is available.
  *
+ * Also tracks its own "open positions" locally and reports them on every
+ * heartbeat, exactly like the real slave-service does from
+ * mt5.positions_get() — this drives reconciliation's "Slave state" without
+ * needing a real MT5 terminal. --drop-position lets you deliberately
+ * under-report a position to produce a SLAVE_POSITION_MISSING finding.
+ *
  * Usage:
  *   npm run simulate:slave -- --token <slave-connector-token>
  *   npm run simulate:slave                                      (reads .dev-slave-connector-token)
  *   npm run simulate:slave -- --fail                             (always replies FAILED, for testing)
  *   npm run simulate:slave -- --balance 5000 --equity 4950        (drives BALANCE_PROPORTIONAL/EQUITY_PROPORTIONAL sizing)
+ *   npm run simulate:slave -- --drop-position 555444              (omit this ticket from reported positions)
  */
 import { readFile } from "node:fs/promises";
 import WebSocket from "ws";
@@ -18,6 +25,16 @@ import WebSocket from "ws";
 const TOKEN_FILE = ".dev-slave-connector-token";
 const PORT = process.env.PORT ?? "4000";
 const WS_URL = process.env.SLAVE_WS_URL ?? `ws://localhost:${PORT}/ws/slave`;
+
+interface TrackedPosition {
+  ticket: string;
+  symbol: string;
+  side?: string;
+  volume: number;
+  sl?: number;
+  tp?: number;
+  comment: string;
+}
 
 function parseArgs(argv: string[]): Record<string, string> {
   const args: Record<string, string> = {};
@@ -53,6 +70,9 @@ async function main() {
   const alwaysFail = args.fail === "true";
   const balance = args.balance ? Number(args.balance) : 5000;
   const equity = args.equity ? Number(args.equity) : balance;
+  const dropTickets = new Set((args["drop-position"] ?? "").split(",").filter(Boolean));
+
+  const positions: TrackedPosition[] = [];
 
   const socket = new WebSocket(WS_URL, { headers: { Authorization: `Bearer ${token}` } });
 
@@ -64,14 +84,48 @@ async function main() {
     const instruction = JSON.parse(raw.toString("utf-8"));
     console.log("[fake-slave] received instruction:", instruction);
 
-    const result = alwaysFail
-      ? { copyId: instruction.copyId, status: "FAILED", reason: "SIMULATED_FAILURE" }
-      : {
-          copyId: instruction.copyId,
-          status: "EXECUTED",
-          slaveTicket: instruction.slaveTicket ?? String(Math.floor(100000 + Math.random() * 900000)),
-          executionPrice: Number((3350 + Math.random()).toFixed(2)),
-        };
+    if (alwaysFail) {
+      const result = { copyId: instruction.copyId, status: "FAILED", reason: "SIMULATED_FAILURE" };
+      setTimeout(() => {
+        socket.send(JSON.stringify(result));
+        console.log("[fake-slave] sent result:", result);
+      }, 20);
+      return;
+    }
+
+    let result: Record<string, unknown>;
+
+    if (instruction.action === "OPEN") {
+      const slaveTicket = String(Math.floor(100000 + Math.random() * 900000));
+      const executionPrice = Number((3350 + Math.random()).toFixed(2));
+      positions.push({
+        ticket: slaveTicket,
+        symbol: instruction.symbol,
+        side: instruction.side,
+        volume: instruction.volume,
+        sl: instruction.sl,
+        tp: instruction.tp,
+        comment: `copy:${instruction.copyId}`,
+      });
+      result = { copyId: instruction.copyId, status: "EXECUTED", slaveTicket, executionPrice };
+    } else if (instruction.action === "CLOSE") {
+      const index = positions.findIndex((p) => p.ticket === instruction.slaveTicket);
+      if (index !== -1) positions.splice(index, 1);
+      result = {
+        copyId: instruction.copyId,
+        status: "EXECUTED",
+        slaveTicket: instruction.slaveTicket,
+        executionPrice: Number((3350 + Math.random()).toFixed(2)),
+      };
+    } else {
+      // MODIFY
+      const position = positions.find((p) => p.ticket === instruction.slaveTicket);
+      if (position) {
+        position.sl = instruction.sl;
+        position.tp = instruction.tp;
+      }
+      result = { copyId: instruction.copyId, status: "EXECUTED", slaveTicket: instruction.slaveTicket };
+    }
 
     setTimeout(() => {
       socket.send(JSON.stringify(result));
@@ -89,10 +143,12 @@ async function main() {
   });
 
   // Keep the process alive; also doubles as a heartbeat so the connector
-  // doesn't get swept OFFLINE while it's just sitting parked.
+  // doesn't get swept OFFLINE while it's just sitting parked. Reports
+  // tracked positions every time, minus anything deliberately dropped.
   setInterval(() => {
     if (socket.readyState === socket.OPEN) {
-      socket.send(JSON.stringify({ type: "heartbeat", balance, equity }));
+      const reportedPositions = positions.filter((p) => !dropTickets.has(p.ticket));
+      socket.send(JSON.stringify({ type: "heartbeat", balance, equity, positions: reportedPositions }));
     }
   }, 5000);
 }

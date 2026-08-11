@@ -2,6 +2,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { prisma } from "../../db/client.js";
 import { redis } from "../../config/redis.js";
 import { env } from "../../config/env.js";
+import type { PositionSnapshotItem } from "../../types/positionSnapshot.js";
 
 const TOKEN_CACHE_PREFIX = "connector:token:";
 const TOKEN_CACHE_TTL_SECONDS = 300;
@@ -72,14 +73,19 @@ export async function registerConnector(owner: ConnectorOwner, version?: string)
 export interface AccountSnapshot {
   balance: number;
   equity: number;
+  // Current open positions, if this heartbeat reported them — the source
+  // data for reconciliation (spec section 21); see
+  // modules/reconciliation/reconciliationEngine.ts. Optional and
+  // independent of balance/equity so a connector can report one without
+  // the other, though in practice both connectors always send both.
+  positions?: PositionSnapshotItem[];
 }
 
 /**
- * Records a heartbeat and, if the connector reported one, the account's
- * current balance/equity — the only source of that data (needed for
- * BALANCE_PROPORTIONAL / EQUITY_PROPORTIONAL volume sizing; see
- * modules/copy-engine/volumeCalculator.ts). Written to whichever entity
- * (Master or Slave) this connector belongs to.
+ * Records a heartbeat and, if the connector reported them, the account's
+ * current balance/equity and open positions — the only source of that
+ * data. Written to whichever entity (Master or Slave) this connector
+ * belongs to.
  */
 export async function recordHeartbeat(connectorId: string, accountInfo?: AccountSnapshot): Promise<void> {
   const now = new Date();
@@ -96,15 +102,19 @@ export async function recordHeartbeat(connectorId: string, accountInfo?: Account
 
   if (!accountInfo) return;
 
+  const positionFields = accountInfo.positions
+    ? { positionSnapshot: accountInfo.positions, positionSnapshotAt: now }
+    : {};
+
   if (connector.masterId) {
     await prisma.master.update({
       where: { id: connector.masterId },
-      data: { balance: accountInfo.balance, equity: accountInfo.equity },
+      data: { balance: accountInfo.balance, equity: accountInfo.equity, ...positionFields },
     });
   } else if (connector.slaveId) {
     await prisma.slave.update({
       where: { id: connector.slaveId },
-      data: { balance: accountInfo.balance, equity: accountInfo.equity },
+      data: { balance: accountInfo.balance, equity: accountInfo.equity, ...positionFields },
     });
   }
 }

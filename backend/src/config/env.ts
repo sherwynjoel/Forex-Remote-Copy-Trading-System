@@ -15,6 +15,15 @@ const envSchema = z.object({
   LOG_LEVEL: z.string().default("info"),
   EVENT_IDEMPOTENCY_TTL_SECONDS: z.coerce.number().int().positive().default(86400),
   CONNECTOR_OFFLINE_THRESHOLD_SECONDS: z.coerce.number().int().positive().default(15),
+
+  // Reconciliation (spec section 21) — see modules/reconciliation/reconciliationEngine.ts.
+  RECONCILIATION_INTERVAL_SECONDS: z.coerce.number().int().positive().default(60),
+  // A snapshot older than this is treated as unreliable rather than
+  // compared — a disconnected connector's stale "last known" positions
+  // must never produce a false MISSING_COPY/UNEXPECTED_SLAVE_POSITION.
+  RECONCILIATION_STALENESS_SECONDS: z.coerce.number().int().positive().default(30),
+  RECONCILIATION_VOLUME_TOLERANCE: z.coerce.number().positive().default(0.01),
+  RECONCILIATION_PRICE_TOLERANCE: z.coerce.number().positive().default(0.0001),
 });
 
 export const env = envSchema.parse(process.env);

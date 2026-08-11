@@ -8,11 +8,11 @@ current build status.
 **Status**: Master trade detection/transmission, Master → Backend → Slave
 copying (OPEN/CLOSE/MODIFY) fanning out concurrently to multiple Slaves,
 per-Slave volume sizing (fixed lot / multiplier / balance- or
-equity-proportional), per-Slave symbol mapping, and risk limits (allowed/
-blocked symbols, max positions, max exposure, emergency stop) all proven
-end-to-end. No PARTIAL_CLOSE/pending orders, max daily loss/drawdown,
-reconciliation, or dashboard yet (see "What's next" in the architecture
-doc).
+equity-proportional), per-Slave symbol mapping, risk limits (allowed/
+blocked symbols, max positions, max exposure, emergency stop), and
+periodic Master/system/Slave reconciliation all proven end-to-end. No
+PARTIAL_CLOSE/pending orders, max daily loss/drawdown, or dashboard yet
+(see "What's next" in the architecture doc).
 
 ## Repository layout
 
@@ -114,6 +114,29 @@ once mapped. With `blockedSymbols` set, that same OPEN should fail in
 `emergencyStop` on, new OPENs are rejected (`EMERGENCY_STOP_ACTIVE`) but a
 CLOSE for a position already open on that Slave still goes through — the
 checks only ever gate new risk, never a reduction of existing risk.
+
+### Trying reconciliation
+
+The fake Slave tracks its own "open positions" locally and reports them on
+every heartbeat, exactly like the real Python service does from
+`mt5.positions_get()`. To see a deliberate mismatch get caught:
+
+```bash
+# Report the Master's open position so the system has something to compare against:
+npm run simulate:master-heartbeat -- --positions '[{"ticket":"700001","symbol":"XAUUSD","volume":1.0,"sl":3340.20,"tp":3370.20}]'
+
+# Restart the fake Slave under-reporting that position (simulates it having
+# silently vanished on the Slave side after being marked EXECUTED):
+npm run simulate:slave -- --drop-position <the slaveTicket the fake slave printed on EXECUTED>
+
+# Trigger a run immediately rather than waiting for the interval:
+curl -X POST http://localhost:4000/api/reconciliation/run
+curl http://localhost:4000/api/reconciliation/findings
+```
+
+You should see a `SLAVE_POSITION_MISSING` finding. Fix the Master/Slave
+snapshots to agree and run again — the finding disappears (`findings` only
+ever reflects the *current* known issues, not a history).
 
 Run the test suite (requires Postgres/Redis up, as above):
 

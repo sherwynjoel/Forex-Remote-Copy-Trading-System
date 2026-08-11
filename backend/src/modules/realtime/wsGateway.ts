@@ -4,6 +4,7 @@ import websocketPlugin from "@fastify/websocket";
 import { z } from "zod";
 import type { WebSocket } from "ws";
 import { authenticateConnector, recordHeartbeat, type AccountSnapshot } from "../connectors/connector.service.js";
+import { positionSnapshotSchema } from "../../types/positionSnapshot.js";
 import { logger } from "../../config/logger.js";
 
 /**
@@ -38,6 +39,7 @@ const heartbeatMessageSchema = z.object({
   type: z.literal("heartbeat"),
   balance: z.number().nonnegative().optional(),
   equity: z.number().optional(),
+  positions: positionSnapshotSchema.optional(),
 });
 
 type HeartbeatParseResult = { isHeartbeat: true; accountInfo?: AccountSnapshot } | { isHeartbeat: false };
@@ -45,10 +47,10 @@ type HeartbeatParseResult = { isHeartbeat: true; accountInfo?: AccountSnapshot }
 function parseHeartbeatMessage(message: unknown): HeartbeatParseResult {
   const parsed = heartbeatMessageSchema.safeParse(message);
   if (!parsed.success) return { isHeartbeat: false };
-  const { balance, equity } = parsed.data;
+  const { balance, equity, positions } = parsed.data;
   return {
     isHeartbeat: true,
-    accountInfo: balance !== undefined && equity !== undefined ? { balance, equity } : undefined,
+    accountInfo: balance !== undefined && equity !== undefined ? { balance, equity, positions } : undefined,
   };
 }
 

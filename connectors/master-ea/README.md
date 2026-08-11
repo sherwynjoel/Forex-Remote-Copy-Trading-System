@@ -92,3 +92,9 @@ As of Phase 4, `OnTimer()`'s heartbeat also includes the account's current
 `balance`/`equity` (via `AccountInfoDouble`) — this is the only source of
 that data for `BALANCE_PROPORTIONAL`/`EQUITY_PROPORTIONAL` volume sizing on
 this Master's Slaves; see [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md).
+
+The heartbeat also now includes a full open-position snapshot
+(`BuildPositionsJson()`, via `PositionsTotal()`/`PositionGetTicket()`) —
+this is the "Master state" side of periodic reconciliation (spec §21). No
+separate timer or endpoint: it rides the same heartbeat, so it's as fresh
+as `balance`/`equity`.

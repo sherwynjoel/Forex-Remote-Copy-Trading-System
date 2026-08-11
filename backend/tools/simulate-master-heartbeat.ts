@@ -9,6 +9,8 @@
  * Usage:
  *   npm run simulate:master-heartbeat -- --balance 10000 --equity 9800
  *   npm run simulate:master-heartbeat                                  (reads .dev-connector-token, defaults to 10000/10000)
+ *   npm run simulate:master-heartbeat -- --positions '[{"ticket":"123456","symbol":"XAUUSD","volume":1.0,"sl":3340.20,"tp":3370.20}]'
+ *     (drives reconciliation's "Master state" — see docs/ARCHITECTURE.md)
  */
 import { readFile } from "node:fs/promises";
 
@@ -49,15 +51,17 @@ async function main() {
   const token = await loadToken(args.token);
   const balance = args.balance ? Number(args.balance) : 10000;
   const equity = args.equity ? Number(args.equity) : balance;
+  const positions = args.positions ? JSON.parse(args.positions) : undefined;
 
+  const body = { balance, equity, ...(positions ? { positions } : {}) };
   const response = await fetch(`${BASE_URL}/api/connectors/heartbeat`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ balance, equity }),
+    body: JSON.stringify(body),
   });
 
   console.log(`HTTP ${response.status}`);
-  console.log(JSON.stringify({ sent: { balance, equity }, response: await response.json() }, null, 2));
+  console.log(JSON.stringify({ sent: body, response: await response.json() }, null, 2));
 }
 
 main().catch((err) => {
