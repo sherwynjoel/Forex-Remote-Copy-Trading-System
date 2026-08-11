@@ -1,0 +1,105 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MasterStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum ConnectorStatus {
+  ONLINE
+  OFFLINE
+  CONNECTING
+  ERROR
+}
+
+enum TradeEventType {
+  OPEN
+  CLOSE
+  MODIFY
+  PARTIAL_CLOSE
+  PENDING_OPEN
+  PENDING_MODIFY
+  PENDING_CANCEL
+}
+
+enum TradeSide {
+  BUY
+  SELL
+}
+
+model Master {
+  id            String       @id @default(uuid())
+  name          String
+  accountNumber String       @unique @map("account_number")
+  broker        String
+  platform      String       @default("MT5")
+  server        String
+  status        MasterStatus @default(ACTIVE)
+  createdAt     DateTime     @default(now()) @map("created_at")
+
+  connectors  Connector[]
+  tradeEvents TradeEvent[]
+
+  @@map("masters")
+}
+
+model Connector {
+  id              String          @id @default(uuid())
+  masterId        String          @map("master_id")
+  master          Master          @relation(fields: [masterId], references: [id])
+  tokenHash       String          @unique @map("token_hash")
+  version         String?
+  status          ConnectorStatus @default(CONNECTING)
+  lastHeartbeatAt DateTime?       @map("last_heartbeat_at")
+  createdAt       DateTime        @default(now()) @map("created_at")
+
+  @@index([masterId])
+  @@map("connectors")
+}
+
+model TradeEvent {
+  id                  String         @id @default(uuid())
+  eventId             String         @unique @map("event_id")
+  masterId            String         @map("master_id")
+  master              Master         @relation(fields: [masterId], references: [id])
+  masterTicket        String         @map("master_ticket")
+  type                TradeEventType
+  symbol              String
+  side                TradeSide?
+  volume              Decimal?       @db.Decimal(18, 2)
+  price               Decimal?       @db.Decimal(18, 5)
+  sl                  Decimal?       @db.Decimal(18, 5)
+  tp                  Decimal?       @db.Decimal(18, 5)
+  rawPayload          Json           @map("raw_payload")
+  masterEventTime     DateTime       @map("master_event_time")
+  eaSentTime          DateTime       @map("ea_sent_time")
+  backendReceivedTime DateTime       @map("backend_received_time")
+  createdAt           DateTime       @default(now()) @map("created_at")
+
+  @@index([masterId])
+  @@index([masterTicket])
+  @@index([createdAt])
+  @@map("trade_events")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  actor     String
+  action    String
+  entity    String
+  oldValue  Json?    @map("old_value")
+  newValue  Json?    @map("new_value")
+  ip        String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([entity])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
