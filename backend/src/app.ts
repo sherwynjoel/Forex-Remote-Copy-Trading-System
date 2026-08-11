@@ -1,5 +1,7 @@
 import Fastify from "fastify";
+import cors from "@fastify/cors";
 import { logger } from "./config/logger.js";
+import { env } from "./config/env.js";
 import { healthRoutes } from "./modules/monitoring/health.routes.js";
 import { masterRoutes } from "./modules/masters/master.routes.js";
 import { slaveRoutes } from "./modules/slaves/slave.routes.js";
@@ -15,6 +17,16 @@ import { registerAdminWsGateway } from "./modules/realtime/adminWsGateway.js";
 
 export function buildApp() {
   const app = Fastify({ loggerInstance: logger });
+
+  // The dashboard frontend runs on a different origin (Vite dev server /
+  // eventual static host) than the API — without CORS, every fetch() call
+  // it makes fails at the browser before the request even reaches auth.
+  // Connector traffic (EA/Slave service) isn't a browser, so this doesn't
+  // affect it either way.
+  app.register(cors, {
+    origin: env.CORS_ORIGIN,
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE"],
+  });
 
   // Public: system health, and the Master/Slave connector-token-authenticated
   // flows (EA heartbeat/ingest, Slave WS) — completely untouched by admin auth.

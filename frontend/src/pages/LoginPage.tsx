@@ -1,10 +1,15 @@
 import { useState, type FormEvent } from "react";
+import { Navigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 
 export function LoginPage() {
-  const { login, loading, error } = useAuth();
+  const { login, loading, error, isAuthenticated } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+
+  // Covers both a successful login (isAuthenticated flips true, this
+  // component re-renders) and navigating to /login while already signed in.
+  if (isAuthenticated) return <Navigate to="/" replace />;
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();

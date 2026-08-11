@@ -16,6 +16,7 @@
     "prisma:migrate": "prisma migrate dev --schema=src/db/prisma/schema.prisma"
   },
   "dependencies": {
+    "@fastify/cors": "^11.3.0",
     "@fastify/websocket": "^11.3.0",
     "@prisma/client": "^5.20.0",
     "bcryptjs": "^3.0.3",

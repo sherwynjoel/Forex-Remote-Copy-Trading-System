@@ -33,6 +33,11 @@ const envSchema = z.object({
   JWT_EXPIRES_IN: z.string().default("12h"),
   ADMIN_USERNAME: z.string().min(1).default("admin"),
   ADMIN_PASSWORD: z.string().min(1).default("admin"),
+
+  // Origin the dashboard frontend is served from — browsers enforce CORS
+  // on cross-origin fetch()/WebSocket, so without this every admin API
+  // call from the frontend dev server fails before it even reaches auth.
+  CORS_ORIGIN: z.string().min(1).default("http://localhost:5173"),
 });
 
 export const env = envSchema.parse(process.env);
