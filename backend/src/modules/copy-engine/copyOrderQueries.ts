@@ -57,6 +57,23 @@ export async function getOpenPositionsSummary(slaveId: string): Promise<{ count:
 }
 
 /**
+ * The Slave ticket a CLOSE/MODIFY should act on — the most recent EXECUTED
+ * OPEN copy for this (slaveId, masterTicket). Used both when dispatching
+ * (copyEngine.ts::copyToSlave) and, independently, when a polling-based
+ * Slave (MT4 — see connectorPolling.routes.ts) picks up a queued
+ * instruction later. Those two calls can be milliseconds to ~1s apart, but
+ * the answer is deterministic either way: a CLOSE/MODIFY is never even
+ * dispatched without this already existing.
+ */
+export async function findExecutedOpenSlaveTicket(slaveId: string, masterTicket: string): Promise<string | null> {
+  const priorOpen = await prisma.copyOrder.findFirst({
+    where: { slaveId, masterTicket, type: "OPEN", status: "EXECUTED" },
+    orderBy: { createdAt: "desc" },
+  });
+  return priorOpen?.slaveTicket ?? null;
+}
+
+/**
  * The SL/TP a Slave position for this masterTicket is currently expected
  * to have — from the *latest* EXECUTED OPEN-or-MODIFY copy, not just the
  * original OPEN, since a Master MODIFY after the open changes the

@@ -1,0 +1,23 @@
+# Caddy automatically provisions and renews a Let's Encrypt TLS
+# certificate for {$DOMAIN} — no manual cert management. Set DOMAIN in
+# .env.production before starting (see docs/DEPLOYMENT.md). Using a bare
+# IP address or "localhost" here disables automatic HTTPS; that's fine for
+# a first smoke test but not for anything real.
+{$DOMAIN} {
+	# Admin API + connector endpoints + both WebSocket gateways.
+	handle /api/* {
+		reverse_proxy backend:4000
+	}
+	handle /ws/* {
+		reverse_proxy backend:4000
+	}
+
+	# The built dashboard (frontend/dist) for everything else. try_files
+	# falls back to index.html so client-side routes (e.g. /slaves/<id>)
+	# don't 404 on a hard refresh.
+	handle {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+}

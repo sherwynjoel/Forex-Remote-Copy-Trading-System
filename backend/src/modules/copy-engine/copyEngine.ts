@@ -4,12 +4,13 @@ import { redisSub } from "../../config/redis.js";
 import { logger } from "../../config/logger.js";
 import { onSlaveMessage, sendToSlave, isSlaveConnected } from "../realtime/wsGateway.js";
 import { broadcastToAdmins } from "../realtime/adminWsGateway.js";
+import { hasOnlineConnector } from "../connectors/connector.service.js";
 import { executionResultSchema, type CopyAction, type CopyInstruction } from "../../types/copyOrder.js";
 import type { NormalizedTradeEvent } from "../../types/tradeEvent.js";
 import { calculateVolume } from "./volumeCalculator.js";
 import { checkEntryAllowed, checkExposureAllowed } from "./riskChecks.js";
 import { resolveSlaveSymbol } from "../slaves/symbolMapping.service.js";
-import { getOpenPositionsSummary } from "./copyOrderQueries.js";
+import { getOpenPositionsSummary, findExecutedOpenSlaveTicket } from "./copyOrderQueries.js";
 
 const MASTER_EVENTS_PATTERN = "master:*:events";
 
@@ -105,7 +106,7 @@ async function handleMasterEvent(event: NormalizedTradeEvent): Promise<void> {
  * truth (Postgres is). Includes symbol/side from the trade event context
  * so the frontend doesn't need a join for the common case.
  */
-function broadcastCopyOrder(params: {
+export function broadcastCopyOrder(params: {
   copyId: string;
   masterId: string;
   slaveId: string;
@@ -176,12 +177,9 @@ async function copyToSlave(
     // Risk limits and the volume calculator gate OPEN only — a limit or an
     // emergency stop exists to prevent new risk, not to trap existing risk
     // open by blocking a reduction.
-    const priorOpen = await prisma.copyOrder.findFirst({
-      where: { slaveId, masterTicket: event.masterTicket, type: "OPEN", status: "EXECUTED" },
-      orderBy: { createdAt: "desc" },
-    });
+    const priorOpenTicket = await findExecutedOpenSlaveTicket(slaveId, event.masterTicket);
 
-    if (!priorOpen?.slaveTicket) {
+    if (!priorOpenTicket) {
       await failCopyOrder({
         tradeEventId,
         masterId: event.masterId,
@@ -194,7 +192,7 @@ async function copyToSlave(
       });
       return;
     }
-    slaveTicket = priorOpen.slaveTicket;
+    slaveTicket = priorOpenTicket;
   } else if (event.type === "OPEN") {
     const openSummary = await getOpenPositionsSummary(slaveId);
 
@@ -287,7 +285,14 @@ async function copyToSlave(
     },
   });
 
-  if (!isSlaveConnected(slaveId)) {
+  // MT4 Slaves have no persistent socket to check — WebRequest() can only
+  // ever poll out, never be pushed to (see connectors/master-ea-mt4). Their
+  // "online" signal is the same connector heartbeat freshness that drives
+  // the offline sweep everywhere else, not a live connection.
+  const isMt4Slave = slave.platform === "MT4";
+  const online = isMt4Slave ? await hasOnlineConnector(slaveId) : isSlaveConnected(slaveId);
+
+  if (!online) {
     await prisma.copyOrder.update({
       where: { id: copyOrder.id },
       data: { status: "FAILED", errorReason: "SLAVE_OFFLINE" },
@@ -304,6 +309,27 @@ async function copyToSlave(
       side: event.side,
       volume,
       errorReason: "SLAVE_OFFLINE",
+    });
+    return;
+  }
+
+  if (isMt4Slave) {
+    // No live push transport — leave the row PENDING. The Slave's own poll
+    // (GET /api/connectors/pending-instruction, connectorPolling.routes.ts)
+    // picks it up and transitions PENDING -> SENT itself, rebuilding the
+    // same instruction shape from this row + its trade_event at pickup
+    // time rather than needing it persisted here.
+    broadcastCopyOrder({
+      copyId: copyOrder.id,
+      masterId: event.masterId,
+      slaveId,
+      masterTicket: event.masterTicket,
+      type: event.type,
+      status: "PENDING",
+      symbol: event.symbol,
+      side: event.side,
+      volume,
+      slaveTicket,
     });
     return;
   }
@@ -339,7 +365,14 @@ async function copyToSlave(
   });
 }
 
-async function handleSlaveMessage(slaveId: string, rawMessage: unknown): Promise<void> {
+/**
+ * Records an execution/failure result from a Slave connector. Called both
+ * from the WS message handler above (MT5) and directly from
+ * connectorPolling.routes.ts's POST /api/connectors/execution-result (MT4)
+ * — the business logic is identical regardless of which transport the
+ * result arrived over.
+ */
+export async function handleSlaveMessage(slaveId: string, rawMessage: unknown): Promise<void> {
   const parsed = executionResultSchema.safeParse(rawMessage);
   if (!parsed.success) {
     logger.warn({ slaveId, rawMessage }, "malformed execution result from slave connector");

@@ -1,13 +1,16 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { usePolling } from "../lib/usePolling";
 import { DataTable, type Column } from "../components/DataTable";
 import { StatusBadge } from "../components/StatusBadge";
+import { CreateAccountModal } from "../components/CreateAccountModal";
 import type { Master } from "../lib/types";
 
 export function MastersPage() {
   const navigate = useNavigate();
-  const { data: masters, error } = usePolling<Master[]>(() => api.get("/api/masters"));
+  const { data: masters, error, refetch } = usePolling<Master[]>(() => api.get("/api/masters"));
+  const [showCreate, setShowCreate] = useState(false);
 
   const columns: Column<Master>[] = [
     { header: "Name", render: (m) => m.name },
@@ -21,7 +24,15 @@ export function MastersPage() {
 
   return (
     <div>
-      <h1 className="text-xl font-semibold text-slate-100">Masters</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold text-slate-100">Masters</h1>
+        <button
+          onClick={() => setShowCreate(true)}
+          className="rounded bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-900 hover:bg-white"
+        >
+          + Add Master
+        </button>
+      </div>
       {error ? <p className="mt-4 text-sm text-red-400">{error}</p> : null}
       <div className="mt-6">
         <DataTable
@@ -32,6 +43,10 @@ export function MastersPage() {
           onRowClick={(m) => navigate(`/masters/${m.id}`)}
         />
       </div>
+
+      {showCreate ? (
+        <CreateAccountModal kind="master" onClose={() => setShowCreate(false)} onCreated={refetch} />
+      ) : null}
     </div>
   );
 }

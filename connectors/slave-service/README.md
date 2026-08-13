@@ -13,18 +13,22 @@ use different connector technologies.
   via IPC — it does not manage login itself unless you pass credentials).
 - Python 3.9+ (for `asyncio.to_thread`).
 - The backend running and reachable (see the top-level README).
-- A registered Slave + connector token:
+- A registered Slave + connector token. Both calls below are behind admin
+  auth (Phase 6) — get a token first (`POST /api/auth/login`, see the
+  top-level README's "Admin API access" section), then:
 
   ```bash
   curl -X POST http://localhost:4000/api/slaves \
-    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
     -d '{"masterId":"<masterId>","name":"My Slave","accountNumber":"87654321","broker":"MyBroker","platform":"MT5","server":"MyBroker-Demo"}'
 
   curl -X POST http://localhost:4000/api/slaves/<slaveId>/connectors \
-    -H "Content-Type: application/json" -d '{"version":"1.0.0"}'
+    -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" -d '{"version":"1.0.0"}'
   ```
 
   The second call returns a `token` **once** — that's your `CONNECTOR_TOKEN`.
+  It's a separate credential from the admin token above — the Slave service
+  only ever uses this one.
 
 ## Install
 

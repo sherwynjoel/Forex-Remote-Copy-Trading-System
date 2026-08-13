@@ -10,19 +10,23 @@ events to the backend. It contains no trading/business logic by design.
   account logged in.
 - The backend running and reachable from the machine the terminal is on
   (`npm run dev` in `backend/`, see the top-level README).
-- A registered Master + connector token:
+- A registered Master + connector token. Both calls below are behind admin
+  auth (Phase 6) — get a token first (`POST /api/auth/login`, see the
+  top-level README's "Admin API access" section), then:
 
   ```bash
   curl -X POST http://localhost:4000/api/masters \
-    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
     -d '{"name":"My Master","accountNumber":"12345678","broker":"MyBroker","platform":"MT5","server":"MyBroker-Demo"}'
 
   curl -X POST http://localhost:4000/api/masters/<masterId>/connectors \
-    -H "Content-Type: application/json" -d '{"version":"1.0.0"}'
+    -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" -d '{"version":"1.0.0"}'
   ```
 
   The second call returns a `token` **once** — copy it, you'll paste it into
-  the EA's `ConnectorToken` input. Only its hash is stored server-side.
+  the EA's `ConnectorToken` input. Only its hash is stored server-side. This
+  connector token is a completely separate credential from the admin token
+  above — the EA only ever uses this one, never the admin JWT.
 
 ## Install into the terminal
 

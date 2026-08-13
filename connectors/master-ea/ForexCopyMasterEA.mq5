@@ -25,7 +25,11 @@ input int    TimerIntervalSeconds       = 1;                       // drives ret
 input int    BrokerGmtOffsetHours       = 0;                       // set to your broker server's UTC offset so latency timestamps are accurate
 
 HttpClient http;
-datetime   g_lastHeartbeat = 0;
+// Wall-clock milliseconds (GetTickCount64()), not TimeCurrent() — see
+// Http.mqh's RetryItem.nextAttemptAtMs comment for why: TimeCurrent() is
+// the symbol's last known tick time, which stalls whenever no new price
+// ticks arrive, silently freezing anything scheduled off of it.
+ulong      g_lastHeartbeatMs = 0;
 long       g_accountLogin  = 0;
 int        g_eventSeq      = 0;
 
@@ -54,7 +58,7 @@ void OnTimer()
   {
    http.ProcessRetryQueue();
 
-   if(TimeCurrent() - g_lastHeartbeat >= HeartbeatIntervalSeconds)
+   if(GetTickCount64() - g_lastHeartbeatMs >= (ulong)HeartbeatIntervalSeconds * 1000)
      {
       // Balance/equity/positions ride on the heartbeat since it already
       // flows every few seconds — this is the only source of that data for
@@ -65,7 +69,7 @@ void OnTimer()
       hb.AddNumber("equity", AccountInfoDouble(ACCOUNT_EQUITY), 2);
       hb.AddRaw("positions", BuildPositionsJson());
       http.SendHeartbeat(hb.Build());
-      g_lastHeartbeat = TimeCurrent();
+      g_lastHeartbeatMs = GetTickCount64();
      }
   }
 

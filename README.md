@@ -1,9 +1,10 @@
 # Forex Remote Copy Trading System
 
 A production-oriented system that replicates trading activity from a Master
-MT5 account to multiple Slave MT5 accounts in real time. See
+MT4/MT5 account to multiple Slave MT4/MT5 accounts in real time. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full layered design and
-current build status.
+current build status, and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for
+running this on a real server instead of localhost.
 
 **Status**: Master trade detection/transmission, Master → Backend → Slave
 copying (OPEN/CLOSE/MODIFY) fanning out concurrently to multiple Slaves,
@@ -27,8 +28,19 @@ Symbol Mapping UI, Reconciliation viewer, Audit Logs, Settings) yet (see
   Live Trades.
 - `connectors/master-ea/` — the MQL5 Expert Advisor that runs on the Master
   MT5 terminal.
+- `connectors/master-ea-mt4/` — the MQL4 equivalent for a Master on MT4.
+  Written and code-reviewed but **not yet compiled or run against a real
+  MT4 terminal** — treat the first compile as the real verification step,
+  same caveat the MT5 EA started with.
 - `connectors/slave-service/` — the Python service that runs on each Slave
   MT5 terminal.
+- `connectors/slave-ea-mt4/` — the MQL4 equivalent for a Slave on MT4:
+  polls the backend instead of holding a WebSocket, since MQL4 has no
+  IPC package like MT5's. Same not-yet-compiled caveat as
+  `master-ea-mt4/`.
+- `docker-compose.prod.yml`, `deploy/`, `backend/Dockerfile` — the
+  production stack (Postgres, Redis, backend, Caddy for automatic HTTPS).
+  See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 - `docs/` — architecture and design notes.
 
 ## Quickstart

@@ -120,6 +120,21 @@ export async function recordHeartbeat(connectorId: string, accountInfo?: Account
 }
 
 /**
+ * Whether this Slave has a currently-ONLINE connector — the polling
+ * equivalent of wsGateway.ts's isSlaveConnected() for MT4 Slaves, which
+ * have no persistent socket to check. "Online" here means the same thing
+ * it means everywhere else in the system: a heartbeat within
+ * CONNECTOR_OFFLINE_THRESHOLD_SECONDS (see sweepOfflineConnectors below).
+ */
+export async function hasOnlineConnector(slaveId: string): Promise<boolean> {
+  const connector = await prisma.connector.findFirst({
+    where: { slaveId, status: "ONLINE" },
+    select: { id: true },
+  });
+  return !!connector;
+}
+
+/**
  * Marks any connector whose last heartbeat is older than the configured
  * threshold as OFFLINE. Intended to be run on a fixed interval from server.ts.
  */

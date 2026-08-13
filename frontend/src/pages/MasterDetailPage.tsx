@@ -1,14 +1,17 @@
+import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { usePolling } from "../lib/usePolling";
 import { StatusBadge } from "../components/StatusBadge";
 import { DataTable, type Column } from "../components/DataTable";
+import { CreateAccountModal } from "../components/CreateAccountModal";
 import type { Master, Slave } from "../lib/types";
 
 export function MasterDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { data: master, error } = usePolling<Master>(() => api.get(`/api/masters/${id}`));
+  const { data: master, error, refetch } = usePolling<Master>(() => api.get(`/api/masters/${id}`));
+  const [showCreate, setShowCreate] = useState(false);
 
   if (error) return <p className="text-sm text-red-400">{error}</p>;
   if (!master) return <p className="text-sm text-slate-500">Loading…</p>;
@@ -38,7 +41,17 @@ export function MasterDetailPage() {
         <Stat label="Equity" value={master.equity ? Number(master.equity).toFixed(2) : "—"} />
       </div>
 
-      <h2 className="mt-8 text-sm font-semibold uppercase tracking-wide text-slate-400">Assigned Slaves</h2>
+      <div className="mt-8 flex items-center justify-between">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+          Assigned Slaves ({master.slaves?.length ?? 0})
+        </h2>
+        <button
+          onClick={() => setShowCreate(true)}
+          className="rounded bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-900 hover:bg-white"
+        >
+          + Add Slave
+        </button>
+      </div>
       <div className="mt-2">
         <DataTable
           columns={slaveColumns}
@@ -48,6 +61,10 @@ export function MasterDetailPage() {
           onRowClick={(s) => navigate(`/slaves/${s.id}`)}
         />
       </div>
+
+      {showCreate ? (
+        <CreateAccountModal kind="slave" masterId={master.id} onClose={() => setShowCreate(false)} onCreated={refetch} />
+      ) : null}
     </div>
   );
 }
